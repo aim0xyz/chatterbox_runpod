@@ -2,9 +2,9 @@
 set -e
 
 echo "============================================"
+echo "[startup] Chatterbox TTS Handler v1.1"
 echo "[startup] Patching Chatterbox library..."
 echo "============================================"
-
 # Find the chatterbox installation path
 CHATTERBOX_PATH=$(python3 -c "import chatterbox; import os; print(os.path.dirname(chatterbox.__file__))" 2>/dev/null || echo "")
 
