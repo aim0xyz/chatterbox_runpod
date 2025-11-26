@@ -79,13 +79,18 @@ RUN python -c "import chatterbox; print('Chatterbox version:', chatterbox.__vers
 
 # Install the serverless handler HTTP stack
 RUN pip install --no-cache-dir \
-    "runpod>=0.9.0"
+    "runpod>=0.9.0" \
+    soundfile
 
-# Copy your custom handler into the container
-COPY handler.py .
+# Copy your custom handler and startup script into the container
+COPY handler.py /handler.py
+COPY start.sh /start.sh
+
+# Make startup script executable
+RUN chmod +x /start.sh
 
 # Verify handler can at least be parsed
-RUN python -c "import handler; print('Handler module loads successfully')" || echo "Warning: Handler import test failed"
+RUN python -c "import sys; sys.path.insert(0, '/'); import handler; print('Handler module loads successfully')" || echo "Warning: Handler import test failed"
 
-# Command to run when the container starts
-CMD ["python", "-u", "handler.py"]
+# Command to run when the container starts - use start.sh to patch Chatterbox first
+CMD ["/start.sh"]
