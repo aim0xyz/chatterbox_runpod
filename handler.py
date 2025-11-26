@@ -335,7 +335,7 @@ def safe_generate(tts_model, gen_params):
             p.pop(k, None)
         return tts_model.generate(**p)
 
-def generate_chunk_with_guard(tts_model, base_params, chunk_text, base_seed, spc_threshold=800):
+def generate_chunk_with_guard(tts_model, base_params, chunk_text, base_seed, spc_threshold=600):
     """
     Generate one chunk. If the output is suspiciously short (premature stop),
     it retries with different parameters.
@@ -369,11 +369,12 @@ def generate_chunk_with_guard(tts_model, base_params, chunk_text, base_seed, spc
 
     wav, spc = one_pass(rp=rp0, top_p=top_p0, min_p=min_p0, seed_offset=0)
 
-    # Guard Check
-    if spc < spc_threshold:
+    # Guard Check - Only retry if spc is suspiciously low (very short audio)
+    # Increased threshold check to avoid false positives on legitimate short sentences
+    if spc < spc_threshold and spc < 300:  # Only retry if extremely short (likely incomplete)
         print(f"[guard] Premature stop detected (spc={spc:.0f}). Retrying chunk...")
-        # Retry with higher penalty and different seed
-        wav, spc = one_pass(rp=max(1.1, rp0 + 0.2), top_p=top_p0, min_p=min_p0, seed_offset=1337)
+        # Retry with lower repetition penalty to allow more generation
+        wav, spc = one_pass(rp=max(1.0, rp0 - 0.1), top_p=top_p0, min_p=min_p0, seed_offset=1337)
 
     return wav
 
@@ -463,7 +464,7 @@ def generate_tts_handler(job):
         # Settings
         language = job_input.get("language", "en")
         exaggeration = float(job_input.get("exaggeration", 0.6))
-        temperature = float(job_input.get("temperature", 0.1))
+        temperature = float(job_input.get("temperature", 0.6))  # Increased from 0.1 to 0.6 for more complete generation
         seed_input = int(job_input.get("seed", 0))
 
         print(f"[tts] Processing request for user: {user_id}")
@@ -514,10 +515,10 @@ def generate_tts_handler(job):
         base_params = {
             "language_id": language,
             "audio_prompt_path": audio_prompt_path,
-            "cfg_weight": float(job_input.get("cfg_weight", 0.3)),
+            "cfg_weight": float(job_input.get("cfg_weight", 0.85)),  # Slower, more deliberate speech
             "exaggeration": exaggeration,
             "temperature": temperature,
-            "repetition_penalty": float(job_input.get("repetition_penalty", 1.4)),
+            "repetition_penalty": float(job_input.get("repetition_penalty", 1.2)),  # Reduced from 1.4 to 1.2 to prevent early stopping
             "top_p": float(job_input.get("top_p", 0.9)),
             "min_p": float(job_input.get("min_p", 0.05)),
         }
@@ -538,7 +539,7 @@ def generate_tts_handler(job):
             # Generate raw
             wav_np = generate_chunk_with_guard(
                 tts_model, base_params, clean_chunk_text, per_chunk_seed,
-                spc_threshold=int(job_input.get("spc_threshold", 800))
+                spc_threshold=int(job_input.get("spc_threshold", 600))  # Lowered threshold to reduce false positives
             )
 
             # FIX: Clean artifacts immediately
