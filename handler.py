@@ -1,10 +1,6 @@
 """
-RunPod Serverless Handler for Chatterbox TTS - Enterprise Edition
-Includes:
-1. "Weird Noise" Fixes (Smart Trimming & Crossfade)
-2. Mobile Audio Support (FFmpeg conversion)
-3. Full Preset & User Voice Management
-4. Verbose Logging & Stability Guards
+RunPod Serverless Handler for Chatterbox TTS - Storyteller Edition
+Simplified and more robust version focused on not losing content.
 """
 
 import os
@@ -27,7 +23,6 @@ import numpy as np
 # --- 1. Environment & Import Setup ---
 print(f"[startup] Python version: {sys.version}")
 
-# Attempt to import Chatterbox with fallback logic
 Chatterbox = None
 try:
     print("[startup] Attempting to import ChatterboxMultilingualTTS...")
@@ -48,7 +43,6 @@ if Chatterbox is None:
 
 # --- 2. Configuration & Paths ---
 
-# diverse paths where models might be mounted in RunPod
 possible_model_paths = [
     Path("/runpod-volume/models"),
     Path(os.getenv("MODEL_PATH", "/models")),
@@ -60,7 +54,6 @@ possible_model_paths = [
 MODEL_PATH = None
 for path in possible_model_paths:
     if path.exists() and path.is_dir():
-        # Look for safetensors or pt files
         model_files = list(path.glob("*.safetensors")) + list(path.glob("*.pt"))
         if model_files:
             MODEL_PATH = path
@@ -75,7 +68,6 @@ VOICE_EMBEDDING_ROOT = Path("/runpod-volume/user_voices")
 PRESET_VOICES_ROOT = Path("/runpod-volume/preset_voices")
 DEFAULT_SAMPLE_RATE = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
 
-# Ensure directories exist
 VOICE_EMBEDDING_ROOT.mkdir(parents=True, exist_ok=True)
 PRESET_VOICES_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -108,10 +100,9 @@ def load_model():
 # --- 4. Helper Functions: Utilities ---
 
 def derive_seed(base_seed: int, chunk_idx: int) -> int:
-    """Deterministically derive a seed for each chunk to ensure consistency."""
+    """Deterministically derive a seed for each chunk."""
     if not base_seed:
         return 0
-    # Simple deterministic mixing
     return (base_seed + (chunk_idx * 10007)) & 0xFFFFFFFF
 
 def get_user_voice_dir(user_id: str) -> Path:
@@ -122,24 +113,17 @@ def get_user_voice_dir(user_id: str) -> Path:
     return user_dir
 
 def get_voice_audio_path(user_id: str = None, embedding_filename: str = None, preset_name: str = None) -> Path:
-    """
-    Smart resolver: Checks Presets first, then User ID folders.
-    """
-    # 1. Check Presets
+    """Smart resolver: Checks Presets first, then User ID folders."""
     if preset_name:
-        # Check exact match (e.g. "en/Male_1.wav")
         preset_path = PRESET_VOICES_ROOT / preset_name
         if preset_path.exists():
             print(f"[voice] Using preset voice: {preset_name}")
             return preset_path
         
-        # Check flat match (e.g. "Male_1" -> "en/Male_1.wav")
-        # This is a simple scan if the user didn't provide the language folder
         for f in PRESET_VOICES_ROOT.rglob(preset_name):
             print(f"[voice] Found fuzzy preset match: {f}")
             return f
             
-    # 2. Check User Voice
     if user_id and embedding_filename:
         user_dir = get_user_voice_dir(user_id)
         audio_path = user_dir / embedding_filename
@@ -151,81 +135,94 @@ def get_voice_audio_path(user_id: str = None, embedding_filename: str = None, pr
 
     return None
 
-# --- 5. Helper Functions: Text Processing ---
+# --- 5. Helper Functions: Text Processing (SIMPLIFIED) ---
 
 def clean_text_for_tts(text: str) -> str:
-    """
-    Normalize quotes and remove invisible characters.
-    """
+    """Normalize quotes and remove invisible characters."""
     replacements = {
         "\u201c": '"', "\u201d": '"', 
         "\u2018": "'", "\u2019": "'",
-        "\u2013": "-", "\u2014": "-", 
-        "\u2026": ".", "«": '"', "»": '"',
+        "\u2013": "-", "\u2014": " - ", 
+        "\u2026": "...", "«": '"', "»": '"',
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
     
-    # Remove weird whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def split_sentences_safely(text: str):
+def split_into_chunks(text: str, max_chars: int = 300) -> list:
     """
-    Split text into sentences but keep quotes intact. 
-    Prevents splitting "Hello," said the man.
+    SIMPLIFIED chunking - split on paragraph breaks and sentence endings.
+    Keeps dialogue intact by not splitting inside quotes.
     """
-    if not re.search(r'[.!?]\s*$', text):
-        text = text.strip() + "."
-
-    # Regex Lookbehind for punctuation, but avoiding splitting inside quotes is complex.
-    # This is a simplified robust splitter.
-    parts = re.split(
-        r'(?<=[.!?])\s+(?=(?:[^"“”«»]*["“”«»][^"“”«»]*["“”«»])*[^"“”«»]*$)',
-        text
-    )
-
-    merged, buf = [], ""
-    for p in parts:
-        p = p.strip()
-        if not p: continue
+    if not text or not text.strip():
+        return []
+    
+    # First, split on paragraph breaks (double newlines or explicit breaks)
+    paragraphs = re.split(r'\n\s*\n', text)
+    
+    all_chunks = []
+    
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+            
+        # If paragraph is short enough, keep it whole
+        if len(para) <= max_chars:
+            all_chunks.append(para)
+            continue
         
-        # Merge tiny fragments (e.g. "No.") into the next sentence to maintain flow
-        if len(buf) + len(p) < 80:
-            buf = (buf + " " + p).strip()
-        else:
-            if buf: merged.append(buf)
-            buf = p
-    if buf: merged.append(buf)
-    return merged
+        # Otherwise, split on sentence boundaries
+        # This regex splits after .!? but NOT if inside quotes
+        sentences = []
+        current = ""
+        in_quote = False
+        
+        i = 0
+        while i < len(para):
+            char = para[i]
+            current += char
+            
+            # Track quote state
+            if char in '""\'"':
+                in_quote = not in_quote
+            
+            # Check for sentence end (only if not in quote)
+            if char in '.!?' and not in_quote:
+                # Look ahead to see if this is really the end
+                next_char = para[i+1] if i+1 < len(para) else ' '
+                if next_char in ' \n""\'' or i+1 >= len(para):
+                    sentences.append(current.strip())
+                    current = ""
+            
+            i += 1
+        
+        # Don't forget the last bit
+        if current.strip():
+            sentences.append(current.strip())
+        
+        # Now pack sentences into chunks
+        current_chunk = ""
+        for sent in sentences:
+            if not current_chunk:
+                current_chunk = sent
+            elif len(current_chunk) + len(sent) + 1 <= max_chars:
+                current_chunk += " " + sent
+            else:
+                all_chunks.append(current_chunk)
+                current_chunk = sent
+        
+        if current_chunk:
+            all_chunks.append(current_chunk)
+    
+    # Final validation
+    final_chunks = [c.strip() for c in all_chunks if c.strip()]
+    
+    return final_chunks
 
-def pack_sentences_into_chunks(sentences, max_chars=400):
-    """Pack sentences into manageable chunks for the model."""
-    chunks = []
-    cur = ""
-    for s in sentences:
-        if not cur:
-            cur = s
-        elif len(cur) + 1 + len(s) <= max_chars:
-            cur = f"{cur} {s}"
-        else:
-            chunks.append(cur.strip())
-            cur = s
-    if cur:
-        chunks.append(cur.strip())
-    return chunks
-
-def insert_quote_pauses(chunks, pause_tag="[pause] "):
-    """
-    Storyteller feature: If a chunk ends in a quote, add a pause marker.
-    """
-    out = chunks[:]
-    for i in range(1, len(out)):
-        if re.search(r'[\"“”»]$', out[i-1]):
-            out[i] = pause_tag + out[i]
-    return out
-
-# --- 6. Helper Functions: Audio Processing (THE FIXES) ---
+# --- 6. Helper Functions: Audio Processing (CONSERVATIVE) ---
 
 def to_numpy_1d(x) -> np.ndarray:
     """Ensure data is a flat float32 numpy array."""
@@ -240,150 +237,120 @@ def to_numpy_1d(x) -> np.ndarray:
     return arr.astype(np.float32)
 
 def gentle_hp(wav_np, sample_rate=DEFAULT_SAMPLE_RATE, cutoff=40.0):
-    """
-    High-pass filter to remove sub-bass rumble (40Hz).
-    """
+    """High-pass filter to remove sub-bass rumble."""
     try:
         from scipy import signal
         wav = wav_np.astype(np.float32)
         sos = signal.butter(2, cutoff, 'hp', fs=sample_rate, output='sos')
         return signal.sosfilt(sos, wav).astype(np.float32)
     except ImportError:
-        # If scipy is missing in the container
         return wav_np.astype(np.float32)
 
-def trim_silence_and_artifacts(wav_np, threshold_db=-35, sample_rate=DEFAULT_SAMPLE_RATE):
+def trim_silence_only(wav_np, threshold_db=-45, sample_rate=DEFAULT_SAMPLE_RATE):
     """
-    THE FIX: Aggressively trims 'hallucinated' static/breathing from the ends of chunks.
+    VERY CONSERVATIVE trimming - only removes true silence from edges.
+    Uses -45dB threshold (very quiet) to avoid cutting speech.
     """
     if len(wav_np) == 0:
         return wav_np
-        
+
     threshold_amp = 10 ** (threshold_db / 20)
     abs_wav = np.abs(wav_np)
     mask = abs_wav > threshold_amp
-    
-    # If audio is empty/silent
-    if not np.any(mask):
-        return np.zeros(int(0.1 * sample_rate), dtype=np.float32)
 
-    # Find start (first sound)
+    if not np.any(mask):
+        # Entirely silent - return minimal silence
+        return np.zeros(int(0.05 * sample_rate), dtype=np.float32)
+
+    # Find first and last sound
     start_idx = np.argmax(mask)
-    
-    # Find end (last sound) - looking backwards
     end_idx = len(wav_np) - np.argmax(mask[::-1])
-    
-    # Add a safety buffer (50ms) so we don't clip the last syllable
-    padding = int(0.05 * sample_rate)
+
+    # Generous padding (150ms) - storytelling needs room to breathe
+    padding = int(0.15 * sample_rate)
     start_idx = max(0, start_idx - padding)
     end_idx = min(len(wav_np), end_idx + padding)
-    
+
     return wav_np[start_idx:end_idx]
 
-def crossfade_chunks(chunks_np, sample_rate=DEFAULT_SAMPLE_RATE, crossfade_ms=30, pause_ms=200):
+def apply_fade(wav_np, fade_in_ms=10, fade_out_ms=10, sample_rate=DEFAULT_SAMPLE_RATE):
+    """Apply gentle fade in/out to prevent clicks."""
+    if len(wav_np) == 0:
+        return wav_np
+    
+    wav = wav_np.copy()
+    
+    fade_in_samples = min(int(fade_in_ms * sample_rate / 1000), len(wav) // 4)
+    fade_out_samples = min(int(fade_out_ms * sample_rate / 1000), len(wav) // 4)
+    
+    if fade_in_samples > 0:
+        wav[:fade_in_samples] *= np.linspace(0, 1, fade_in_samples).astype(np.float32)
+    
+    if fade_out_samples > 0:
+        wav[-fade_out_samples:] *= np.linspace(1, 0, fade_out_samples).astype(np.float32)
+    
+    return wav
+
+def stitch_chunks(chunks_np, sample_rate=DEFAULT_SAMPLE_RATE, pause_ms=250):
     """
-    THE FIX: Stitches chunks with a pause (for pacing) and micro-fades 
-    to prevent clicks/pops at the join points.
+    Simple stitching with pauses between chunks.
+    Uses 250ms pause for storytelling rhythm.
     """
     if not chunks_np:
         return np.array([], dtype=np.float32)
-    if len(chunks_np) == 1:
-        return chunks_np[0]
-        
-    # Create silence buffer for the pause
-    pause_len = int(sample_rate * (pause_ms / 1000))
-    pause_silence = np.zeros(pause_len, dtype=np.float32)
     
-    final_audio = chunks_np[0]
+    if len(chunks_np) == 1:
+        return apply_fade(chunks_np[0])
+    
+    pause_samples = int(sample_rate * pause_ms / 1000)
+    pause = np.zeros(pause_samples, dtype=np.float32)
+    
+    result = apply_fade(chunks_np[0])
     
     for i in range(1, len(chunks_np)):
-        next_chunk = chunks_np[i]
-        
-        # 1. Add the pause
-        final_audio = np.concatenate([final_audio, pause_silence])
-        
-        # 2. Micro-fade to prevent pops
-        # We fade out the last few ms of the previous clip and fade in the next
-        fade_samples = 100 # Short fade just for zero-crossing safety
-        
-        # Fade out end
-        if len(final_audio) > fade_samples:
-            final_audio[-fade_samples:] *= np.linspace(1, 0, fade_samples)
-            
-        # Fade in start
-        if len(next_chunk) > fade_samples:
-            next_chunk_faded = next_chunk.copy()
-            next_chunk_faded[:fade_samples] *= np.linspace(0, 1, fade_samples)
-        else:
-            next_chunk_faded = next_chunk
+        chunk = apply_fade(chunks_np[i])
+        result = np.concatenate([result, pause, chunk])
+    
+    return result
 
-        final_audio = np.concatenate([final_audio, next_chunk_faded])
-        
-    return final_audio
-
-# --- 7. Generation Logic ---
+# --- 7. Generation Logic (SIMPLIFIED - NO GUARD) ---
 
 def safe_generate(tts_model, gen_params):
-    """Safely call generate, handling param mismatches between versions."""
+    """Safely call generate, handling param mismatches."""
     try:
         return tts_model.generate(**gen_params)
     except TypeError as e:
-        # Fallback: remove advanced params if the installed model is old
         print(f"[generate] TypeError: {e}. Retrying with basic params.")
         p = dict(gen_params)
         for k in ("repetition_penalty", "top_p", "min_p"):
             p.pop(k, None)
         return tts_model.generate(**p)
 
-def generate_chunk_with_guard(tts_model, base_params, chunk_text, base_seed, spc_threshold=600):
+def generate_chunk(tts_model, params, chunk_text, seed=0):
     """
-    Generate one chunk. If the output is suspiciously short (premature stop),
-    it retries with different parameters.
+    Generate audio for a single chunk.
+    NO GUARD/RETRY - just generate once and trust the model.
+    Retrying often makes things worse.
     """
-    def one_pass(rp=None, top_p=None, min_p=None, seed_offset=0):
-        p = dict(base_params)
-        p["text"] = chunk_text
-        if rp is not None: p["repetition_penalty"] = rp
-        if top_p is not None: p["top_p"] = top_p
-        if min_p is not None: p["min_p"] = min_p
-
-        if base_seed:
-            s = (base_seed + seed_offset) & 0xFFFFFFFF
-            torch.manual_seed(s)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(s)
-            np.random.seed(s)
-            random.seed(s)
-
-        out = safe_generate(tts_model, p)
-        wav = to_numpy_1d(out)
-        
-        # Samples per character check
-        spc = len(wav) / max(1, len(chunk_text))
-        return wav, spc
-
-    # Initial Attempt
-    rp0 = float(base_params.get("repetition_penalty", 1.4))
-    top_p0 = float(base_params.get("top_p", 0.9))
-    min_p0 = float(base_params.get("min_p", 0.05))
-
-    wav, spc = one_pass(rp=rp0, top_p=top_p0, min_p=min_p0, seed_offset=0)
-
-    # Guard Check - Only retry if spc is suspiciously low (very short audio)
-    # Increased threshold check to avoid false positives on legitimate short sentences
-    if spc < spc_threshold and spc < 300:  # Only retry if extremely short (likely incomplete)
-        print(f"[guard] Premature stop detected (spc={spc:.0f}). Retrying chunk...")
-        # Retry with lower repetition penalty to allow more generation
-        wav, spc = one_pass(rp=max(1.0, rp0 - 0.1), top_p=top_p0, min_p=min_p0, seed_offset=1337)
-
+    gen_params = dict(params)
+    gen_params["text"] = chunk_text
+    
+    if seed:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+    
+    output = safe_generate(tts_model, gen_params)
+    wav = to_numpy_1d(output)
+    
     return wav
 
 # --- 8. API Handlers ---
 
 def clone_voice_handler(job):
-    """
-    Handles converting mobile audio uploads (m4a/mp4) to WAV and saving them.
-    """
+    """Handles converting mobile audio uploads to WAV."""
     try:
         job_input = job.get("input", {})
         audio_base64 = job_input.get("audio_data")
@@ -397,7 +364,6 @@ def clone_voice_handler(job):
 
         user_dir = get_user_voice_dir(user_id)
 
-        # 1. Decode Base64 to Temp File
         try:
             audio_bytes = base64.b64decode(audio_base64)
         except Exception as e:
@@ -409,8 +375,6 @@ def clone_voice_handler(job):
         with open(temp_path, "wb") as f:
             f.write(audio_bytes)
 
-        # 2. Convert using FFmpeg (Critical for mobile uploads)
-        # We convert whatever they sent -> 24000Hz Mono WAV
         final_filename = f"{voice_name}_{uuid.uuid4().hex[:6]}.wav"
         final_path = user_dir / final_filename
 
@@ -418,18 +382,16 @@ def clone_voice_handler(job):
 
         try:
             subprocess.run([
-                "ffmpeg", "-y",          # Overwrite output
-                "-i", str(temp_path),    # Input file
-                "-ar", "24000",          # Sample rate expected by Chatterbox
-                "-ac", "1",              # Mono
+                "ffmpeg", "-y",
+                "-i", str(temp_path),
+                "-ar", "24000",
+                "-ac", "1",
                 str(final_path)
             ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
-            # Cleanup and fail
             if temp_path.exists(): os.remove(temp_path)
             return {"error": "FFmpeg conversion failed. Input format may be invalid."}
         
-        # Cleanup temp file
         if temp_path.exists():
             os.remove(temp_path)
 
@@ -449,9 +411,7 @@ def clone_voice_handler(job):
         return {"error": f"Voice cloning failed: {str(e)}"}
 
 def generate_tts_handler(job):
-    """
-    Main TTS Handler.
-    """
+    """Main TTS Handler - Storyteller optimized."""
     try:
         job_input = job.get("input", {})
         
@@ -461,26 +421,29 @@ def generate_tts_handler(job):
         user_id = job_input.get("user_id")
         embedding_filename = job_input.get("embedding_filename")
         
-        # Settings
+        # Settings - Conservative defaults for storytelling
         language = job_input.get("language", "en")
-        exaggeration = float(job_input.get("exaggeration", 0.6))
-        temperature = float(job_input.get("temperature", 0.6))  # Increased from 0.1 to 0.6 for more complete generation
+        exaggeration = float(job_input.get("exaggeration", 0.5))  # Moderate expression
+        temperature = float(job_input.get("temperature", 0.5))    # Stable output
         seed_input = int(job_input.get("seed", 0))
+        
+        # Chunking settings
+        max_chunk_chars = int(job_input.get("max_chunk_chars", 300))
+        pause_between_chunks_ms = int(job_input.get("pause_ms", 250))
 
-        print(f"[tts] Processing request for user: {user_id}")
-        print(f"[tts] Exaggeration: {exaggeration}, Temp: {temperature}")
+        print(f"[tts] Request for user: {user_id}")
+        print(f"[tts] Text length: {len(text) if text else 0} chars")
+        print(f"[tts] Settings: exag={exaggeration}, temp={temperature}, max_chunk={max_chunk_chars}")
 
         if not text:
             return {"error": "text is required"}
 
-        # --- 1. Resolve Audio Prompt ---
-        
-        # If preset provided, try to infer language from path (e.g. "es/Male1")
+        # --- 1. Resolve Voice ---
         if preset_voice and "/" in preset_voice:
             parts = preset_voice.split("/")
             if len(parts[0]) == 2:
                 language = parts[0]
-                print(f"[tts] Inferring language '{language}' from preset path")
+                print(f"[tts] Inferred language '{language}' from preset path")
 
         audio_path = get_voice_audio_path(
             user_id=user_id,
@@ -489,95 +452,101 @@ def generate_tts_handler(job):
         )
         
         if not audio_path:
-            print(f"[tts] Error: No valid voice file found.")
-            return {"error": "Voice file not found (neither preset nor user voice)"}
+            return {"error": "Voice file not found"}
         
         audio_prompt_path = str(audio_path)
 
-        # --- 2. Preprocess Text ---
+        # --- 2. Clean and Chunk Text ---
         text = clean_text_for_tts(text)
         
-        # Chunking Logic
-        MAX_CHARS = 400
-        if len(text) > 500:
-            print(f"[tts] Text is long ({len(text)} chars). Splitting...")
-            sentences = split_sentences_safely(text)
-            chunks = pack_sentences_into_chunks(sentences, max_chars=MAX_CHARS)
-            # Add story pauses
-            chunks = insert_quote_pauses(chunks)
-            print(f"[tts] Created {len(chunks)} chunks.")
+        if len(text) > max_chunk_chars:
+            chunks = split_into_chunks(text, max_chars=max_chunk_chars)
+            print(f"[tts] Split into {len(chunks)} chunks:")
+            for i, c in enumerate(chunks):
+                print(f"[tts]   {i+1}. ({len(c)} chars) \"{c[:60]}{'...' if len(c) > 60 else ''}\"")
         else:
             chunks = [text]
+            print(f"[tts] Single chunk: {len(text)} chars")
 
-        # --- 3. Load Model & Prepare Params ---
+        if not chunks:
+            return {"error": "No valid text after processing"}
+
+        # --- 3. Load Model ---
         tts_model = load_model()
 
-        base_params = {
+        # Storyteller-optimized parameters
+        gen_params = {
             "language_id": language,
             "audio_prompt_path": audio_prompt_path,
-            "cfg_weight": float(job_input.get("cfg_weight", 0.85)),  # Slower, more deliberate speech
+            "cfg_weight": float(job_input.get("cfg_weight", 0.5)),      # Lower = more natural
             "exaggeration": exaggeration,
             "temperature": temperature,
-            "repetition_penalty": float(job_input.get("repetition_penalty", 1.2)),  # Reduced from 1.4 to 1.2 to prevent early stopping
-            "top_p": float(job_input.get("top_p", 0.9)),
-            "min_p": float(job_input.get("min_p", 0.05)),
+            "repetition_penalty": float(job_input.get("repetition_penalty", 1.05)),  # Very light
+            "top_p": float(job_input.get("top_p", 0.95)),
+            "min_p": float(job_input.get("min_p", 0.02)),
         }
 
-        # --- 4. Generate Chunks ---
-        all_chunks_audio_np = []
-
-        for chunk_idx, chunk_text in enumerate(chunks):
-            # Remove pause tags for generation, we handle timing via silence injection
-            clean_chunk_text = chunk_text.replace("[pause]", "").strip()
-            if not clean_chunk_text:
+        # --- 4. Generate Each Chunk ---
+        audio_chunks = []
+        
+        for i, chunk_text in enumerate(chunks):
+            chunk_text = chunk_text.strip()
+            if not chunk_text:
+                print(f"[tts] Skipping empty chunk {i+1}")
                 continue
 
-            print(f"[tts] Generating chunk {chunk_idx + 1}/{len(chunks)}...")
+            print(f"[tts] Generating chunk {i+1}/{len(chunks)}...")
             
-            per_chunk_seed = derive_seed(seed_input, chunk_idx) if seed_input else 0
+            seed = derive_seed(seed_input, i) if seed_input else 0
             
-            # Generate raw
-            wav_np = generate_chunk_with_guard(
-                tts_model, base_params, clean_chunk_text, per_chunk_seed,
-                spc_threshold=int(job_input.get("spc_threshold", 600))  # Lowered threshold to reduce false positives
-            )
+            try:
+                wav = generate_chunk(tts_model, gen_params, chunk_text, seed)
+                
+                # Light cleanup only
+                wav = trim_silence_only(wav, threshold_db=-45)
+                
+                duration_ms = len(wav) / DEFAULT_SAMPLE_RATE * 1000
+                print(f"[tts]   ✓ Chunk {i+1}: {len(wav)} samples ({duration_ms:.0f}ms)")
+                
+                # Only skip if literally empty
+                if len(wav) > 0:
+                    audio_chunks.append(wav)
+                else:
+                    print(f"[tts]   ⚠ Chunk {i+1} produced no audio")
+                    
+            except Exception as e:
+                print(f"[tts]   ✗ Chunk {i+1} failed: {e}")
+                traceback.print_exc()
+                # Continue with other chunks instead of failing entirely
 
-            # FIX: Clean artifacts immediately
-            wav_cleaned = trim_silence_and_artifacts(wav_np, threshold_db=-35)
-            
-            if len(wav_cleaned) > 0:
-                all_chunks_audio_np.append(wav_cleaned)
+        if not audio_chunks:
+            return {"error": "No audio was generated"}
 
-        if not all_chunks_audio_np:
-            raise RuntimeError("No audio chunks were generated")
+        print(f"[tts] Generated {len(audio_chunks)}/{len(chunks)} chunks successfully")
 
-        # --- 5. Stitching (The Fix) ---
-        print(f"[tts] Stitching {len(all_chunks_audio_np)} chunks with crossfade...")
-        
-        final_wav = crossfade_chunks(
-            all_chunks_audio_np, 
+        # --- 5. Stitch Together ---
+        final_wav = stitch_chunks(
+            audio_chunks, 
             sample_rate=DEFAULT_SAMPLE_RATE, 
-            crossfade_ms=20, 
-            pause_ms=200  # Storyteller pause duration
+            pause_ms=pause_between_chunks_ms
         )
 
-        # Final Polish
-        final_wav = gentle_hp(final_wav, cutoff=40.0)
+        # Light filtering
+        final_wav = gentle_hp(final_wav, cutoff=35.0)
 
-        # Normalize Volume
-        max_amp = np.max(np.abs(final_wav)) + 1e-12
-        if max_amp > 0.99:
-            final_wav = final_wav * (0.98 / max_amp)
-            print(f"[tts] Normalized audio (Peak was {max_amp:.2f})")
+        # Normalize if needed
+        max_amp = np.max(np.abs(final_wav))
+        if max_amp > 0.95:
+            final_wav = final_wav * (0.95 / max_amp)
 
-        # --- 6. Encode Response ---
+        # --- 6. Encode ---
         buf = io.BytesIO()
         sf.write(buf, final_wav, DEFAULT_SAMPLE_RATE, format="WAV")
         buf.seek(0)
         audio_base64 = base64.b64encode(buf.read()).decode('utf-8')
 
         duration_sec = len(final_wav) / DEFAULT_SAMPLE_RATE
-        print(f"[tts] Done. Duration: {duration_sec:.2f}s")
+        print(f"[tts] ✅ Complete. Duration: {duration_sec:.2f}s")
 
         return {
             "status": "success",
@@ -585,6 +554,8 @@ def generate_tts_handler(job):
             "sample_rate": DEFAULT_SAMPLE_RATE,
             "format": "wav",
             "duration_seconds": round(duration_sec, 2),
+            "chunks_generated": len(audio_chunks),
+            "chunks_requested": len(chunks),
         }
 
     except Exception as e:
@@ -593,9 +564,7 @@ def generate_tts_handler(job):
         return {"error": f"TTS generation failed: {str(e)}"}
 
 def list_preset_voices_handler(job):
-    """
-    Lists all available preset voices, grouped by language.
-    """
+    """Lists all available preset voices."""
     try:
         job_input = job.get("input", {})
         target_language = job_input.get("language")
@@ -604,32 +573,28 @@ def list_preset_voices_handler(job):
         
         voices = []
         
-        # Walk through the preset directory
         for path in PRESET_VOICES_ROOT.rglob("*"):
             if path.suffix.lower() in ['.wav', '.mp3', '.flac', '.m4a']:
-                # Get relative path (e.g., "en/Male_1.wav")
                 rel_path = path.relative_to(PRESET_VOICES_ROOT)
                 str_rel = str(rel_path)
                 
-                # Attempt language detection from folder structure
                 lang = "unknown"
                 parts = str_rel.split("/")
                 if len(parts) > 1:
                     possible_lang = parts[0]
-                    if len(possible_lang) == 2: # e.g. 'en', 'es'
+                    if len(possible_lang) == 2:
                         lang = possible_lang
                 
                 if target_language and lang != "unknown" and lang != target_language:
                     continue
 
                 voices.append({
-                    "filename": str_rel,  # This is what the frontend sends back
+                    "filename": str_rel,
                     "name": path.stem.replace("_", " ").title(),
                     "language": lang,
                     "size_bytes": path.stat().st_size
                 })
         
-        # Sort by language, then name
         voices.sort(key=lambda x: (x['language'], x['name']))
         
         print(f"[presets] Found {len(voices)} voices.")
@@ -643,9 +608,7 @@ def list_preset_voices_handler(job):
         return {"error": str(e)}
 
 def list_user_voices_handler(job):
-    """
-    Lists voices cloned by a specific user.
-    """
+    """Lists voices cloned by a specific user."""
     try:
         job_input = job.get("input", {})
         user_id = job_input.get("user_id")
@@ -662,22 +625,19 @@ def list_user_voices_handler(job):
         voices = []
         for f in user_dir.iterdir():
             if f.suffix.lower() in ['.wav', '.mp3']:
-                # Format name nicely
                 display_name = f.stem
                 if "_" in display_name:
-                    # remove the uuid part if possible for display
                     parts = display_name.split("_")
                     if len(parts) > 1:
-                        display_name = " ".join(parts[:-1]) # Remove last part (uuid)
+                        display_name = " ".join(parts[:-1])
                 
                 voices.append({
-                    "filename": f.name, # Critical for API
+                    "filename": f.name,
                     "name": display_name.title(),
                     "created_at": f.stat().st_mtime,
                     "size_bytes": f.stat().st_size
                 })
 
-        # Sort by newest first
         voices.sort(key=lambda x: x['created_at'], reverse=True)
         
         print(f"[user_voices] Found {len(voices)} voices.")
@@ -694,14 +654,13 @@ def list_user_voices_handler(job):
 # --- 9. Main Entry Point ---
 
 def handler(job):
-    """
-    Main router for RunPod requests.
-    """
+    """Main router for RunPod requests."""
     try:
         job_input = job.get("input", {})
         action = job_input.get("action", "generate_tts")
 
-        # Dispatch
+        print(f"[handler] Action: {action}")
+
         if action == "clone_voice":
             return clone_voice_handler(job)
         elif action == "generate_tts":
@@ -714,11 +673,10 @@ def handler(job):
             return {"error": f"Unknown action: {action}"}
 
     except Exception as e:
-        print(f"[fatal] Unhandled exception in handler: {e}")
+        print(f"[fatal] Unhandled exception: {e}")
         traceback.print_exc()
         return {"error": f"Handler crashed: {str(e)}"}
 
 if __name__ == "__main__":
-    print("[startup] RunPod Handler starting...")
-    print("[startup] Ready to accept requests.")
+    print("[startup] RunPod Handler (Storyteller Edition) starting...")
     runpod.serverless.start({"handler": handler})
