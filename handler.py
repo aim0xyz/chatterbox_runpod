@@ -16,12 +16,24 @@ import numpy as np
 
 print(f"[startup] Python: {sys.version}")
 
+# --- Import Multilingual TTS ---
 Chatterbox = None
+MODEL_TYPE = "unknown"
+
 try:
     from chatterbox.tts import ChatterboxTTS as Chatterbox
-    print("[startup] ChatterboxTTS imported")
+    MODEL_TYPE = "english"
+    print("[startup] ChatterboxTTS (English) imported")
 except Exception as e:
-    print(f"[warn] TTS import failed: {e}")
+    print(f"[warn] English TTS import failed: {e}")
+
+try:
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS as ChatterboxMTL
+    MODEL_TYPE = "multilingual"
+    print("[startup] ChatterboxMultilingualTTS imported - will use this")
+except Exception as e:
+    ChatterboxMTL = None
+    print(f"[warn] Multilingual TTS import failed: {e}")
 
 MODEL_PATH = Path("/runpod-volume/models")
 VOICE_ROOT = Path("/runpod-volume/user_voices")
@@ -34,19 +46,32 @@ PRESET_ROOT.mkdir(parents=True, exist_ok=True)
 print(f"[config] Models: {MODEL_PATH}")
 print(f"[config] User voices: {VOICE_ROOT}")
 print(f"[config] Presets: {PRESET_ROOT}")
+print(f"[config] Model type: {MODEL_TYPE}")
 
-model = None
+model_english = None
+model_multilingual = None
 
-def load_model():
-    global model
-    if model is None:
+def load_model(language="en"):
+    global model_english, model_multilingual
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Use multilingual model for non-English languages
+    if language != "en" and ChatterboxMTL is not None:
+        if model_multilingual is None:
+            print(f"[model] Loading MULTILINGUAL model on {device}...")
+            model_multilingual = ChatterboxMTL.from_pretrained(device)
+            print("[model] Multilingual model loaded")
+        return model_multilingual, "multilingual"
+    
+    # Use English model
+    if model_english is None:
         if Chatterbox is None:
-            raise RuntimeError("Chatterbox not available")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[model] Loading on {device}...")
-        model = Chatterbox.from_pretrained(device)
-        print("[model] Loaded successfully")
-    return model
+            raise RuntimeError("No TTS model available")
+        print(f"[model] Loading ENGLISH model on {device}...")
+        model_english = Chatterbox.from_pretrained(device)
+        print("[model] English model loaded")
+    return model_english, "english"
 
 def get_user_dir(user_id):
     safe = "".join(c for c in user_id if c.isalnum() or c in "_-")
@@ -161,6 +186,9 @@ def generate_tts_handler(job):
         preset_voice = inp.get("preset_voice")
         user_id = inp.get("user_id")
         embedding_filename = inp.get("embedding_filename")
+        
+        # Language parameter - default to English
+        language = inp.get("language", "en")
 
         exaggeration = float(inp.get("exaggeration", 0.5))
         temperature = float(inp.get("temperature", 0.7))
@@ -169,6 +197,7 @@ def generate_tts_handler(job):
         pause_ms = int(inp.get("pause_ms", 300))
 
         print(f"[tts] Text length: {len(text)}")
+        print(f"[tts] Language: {language}")
 
         voice_path = find_voice(user_id, embedding_filename, preset_voice)
         if not voice_path:
@@ -185,7 +214,10 @@ def generate_tts_handler(job):
         if not chunks:
             return {"error": "No text to process"}
 
-        tts = load_model()
+        # Load appropriate model based on language
+        tts, model_type = load_model(language)
+        print(f"[tts] Using {model_type} model for language: {language}")
+        
         audio_chunks = []
 
         for i, chunk_text in enumerate(chunks):
@@ -196,13 +228,25 @@ def generate_tts_handler(job):
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed_all(seed)
 
-                output = tts.generate(
-                    text=chunk_text,
-                    audio_prompt_path=str(voice_path),
-                    exaggeration=exaggeration,
-                    temperature=temperature,
-                    cfg_weight=cfg_weight,
-                )
+                # Different generate call based on model type
+                if model_type == "multilingual":
+                    output = tts.generate(
+                        text=chunk_text,
+                        audio_prompt_path=str(voice_path),
+                        language_id=language,
+                        exaggeration=exaggeration,
+                        temperature=temperature,
+                        cfg_weight=cfg_weight,
+                    )
+                else:
+                    # English model doesn't use language_id
+                    output = tts.generate(
+                        text=chunk_text,
+                        audio_prompt_path=str(voice_path),
+                        exaggeration=exaggeration,
+                        temperature=temperature,
+                        cfg_weight=cfg_weight,
+                    )
 
                 wav = to_numpy(output)
                 print(f"[tts]   Generated {len(wav)} samples")
@@ -238,6 +282,8 @@ def generate_tts_handler(job):
             "duration_seconds": round(duration_sec, 2),
             "chunks_generated": len(audio_chunks),
             "chunks_requested": len(chunks),
+            "language": language,
+            "model_type": model_type,
         }
 
     except Exception as e:
