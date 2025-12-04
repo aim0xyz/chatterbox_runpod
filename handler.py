@@ -382,29 +382,62 @@ def delete_voice_handler(job):
     try:
         inp = job.get("input", {})
         user_id = inp.get("user_id")
-        voice_id = inp.get("voice_id")  # This is the filename (e.g., "Mama_de42b3.wav")
+        voice_id = inp.get("voice_id")  # This is the filename (e.g., "Mama_de42b3.wav" or "unique_3fda66.wav")
 
         if not user_id:
             return {"error": "user_id is required"}
         if not voice_id:
             return {"error": "voice_id is required"}
 
-        print(f"[delete] User: {user_id}, Voice: {voice_id}")
+        print(f"[delete] User: {user_id}, Voice ID: {voice_id}")
 
-        user_dir = get_user_dir(user_id)
-        voice_path = user_dir / voice_id
-
-        if not voice_path.exists():
-            print(f"[delete] Voice file not found: {voice_path}")
-            return {"error": f"Voice file not found: {voice_id}"}
+        # First, try to find the voice using the helper function (same as TTS handler)
+        voice_path = find_voice(user_id=user_id, filename=voice_id)
+        
+        # If not found, try with different extensions
+        if not voice_path:
+            user_dir = get_user_dir(user_id)
+            print(f"[delete] Voice not found with exact filename, trying extensions...")
+            print(f"[delete] User directory: {user_dir}")
+            
+            # List all files in user directory for debugging
+            if user_dir.exists():
+                all_files = list(user_dir.iterdir())
+                print(f"[delete] Files in user directory: {[f.name for f in all_files]}")
+            
+            # Try with .wav extension if not present
+            if not voice_id.endswith('.wav') and not voice_id.endswith('.mp3'):
+                for ext in ['.wav', '.mp3']:
+                    test_path = user_dir / f"{voice_id}{ext}"
+                    if test_path.exists():
+                        voice_path = test_path
+                        print(f"[delete] Found voice with extension: {test_path.name}")
+                        break
+            
+            # If still not found, try exact match
+            if not voice_path:
+                test_path = user_dir / voice_id
+                if test_path.exists():
+                    voice_path = test_path
+                    print(f"[delete] Found voice with exact filename: {voice_id}")
+        
+        if not voice_path or not voice_path.exists():
+            user_dir = get_user_dir(user_id)
+            error_msg = f"Voice file not found: {voice_id}"
+            if user_dir.exists():
+                available_files = [f.name for f in user_dir.iterdir() if f.is_file()]
+                error_msg += f". Available files: {available_files}"
+            print(f"[delete] {error_msg}")
+            return {"error": error_msg}
 
         # Delete the voice file
+        print(f"[delete] Deleting file: {voice_path}")
         voice_path.unlink()
-        print(f"[delete] Deleted: {voice_id}")
+        print(f"[delete] ✅ Successfully deleted: {voice_path.name}")
 
         return {
             "status": "success",
-            "message": f"Voice {voice_id} deleted successfully",
+            "message": f"Voice {voice_path.name} deleted successfully",
         }
 
     except Exception as e:
