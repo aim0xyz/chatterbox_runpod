@@ -378,6 +378,40 @@ def list_user_voices_handler(job):
         print(f"[error] List user voices failed: {e}")
         return {"error": str(e)}
 
+def delete_voice_handler(job):
+    try:
+        inp = job.get("input", {})
+        user_id = inp.get("user_id")
+        voice_id = inp.get("voice_id")  # This is the filename (e.g., "Mama_de42b3.wav")
+
+        if not user_id:
+            return {"error": "user_id is required"}
+        if not voice_id:
+            return {"error": "voice_id is required"}
+
+        print(f"[delete] User: {user_id}, Voice: {voice_id}")
+
+        user_dir = get_user_dir(user_id)
+        voice_path = user_dir / voice_id
+
+        if not voice_path.exists():
+            print(f"[delete] Voice file not found: {voice_path}")
+            return {"error": f"Voice file not found: {voice_id}"}
+
+        # Delete the voice file
+        voice_path.unlink()
+        print(f"[delete] Deleted: {voice_id}")
+
+        return {
+            "status": "success",
+            "message": f"Voice {voice_id} deleted successfully",
+        }
+
+    except Exception as e:
+        print(f"[error] Delete voice failed: {e}")
+        traceback.print_exc()
+        return {"error": str(e)}
+
 def handler(job):
     try:
         action = job.get("input", {}).get("action", "generate_tts")
@@ -391,6 +425,8 @@ def handler(job):
             return list_preset_voices_handler(job)
         elif action == "list_user_voices":
             return list_user_voices_handler(job)
+        elif action == "delete_voice":
+            return delete_voice_handler(job)
         else:
             return {"error": f"Unknown action: {action}"}
 
