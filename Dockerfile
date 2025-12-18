@@ -39,7 +39,8 @@ RUN pip install --timeout=600 --no-cache-dir \
     packaging==23.1 \
     python-multipart==0.0.2 \
     onnx==1.17.0 \
-    onnxruntime==1.19.2
+    onnxruntime==1.19.2 \
+    omegaconf>=2.3.0
 
 RUN pip install --no-cache-dir --no-deps \
     resemble-perth==1.0.1 \
