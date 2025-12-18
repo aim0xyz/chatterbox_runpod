@@ -272,9 +272,31 @@ def generate_tts_handler(job):
 
         final_wav = stitch_chunks(audio_chunks, pause_ms=pause_ms)
 
-        max_amp = np.max(np.abs(final_wav))
-        if max_amp > 0.9:
-            final_wav = final_wav * (0.9 / max_amp)
+        # --- Loudness normalization so presets and user voices are similar ---
+        # We normalize using both peak and RMS:
+        # - target_peak caps the absolute maximum to avoid clipping
+        # - target_rms lifts quieter audio (like many user voices) closer to a consistent level
+        if len(final_wav) > 0:
+            max_amp = np.max(np.abs(final_wav))
+            rms = float(np.sqrt(np.mean(final_wav ** 2)))
+
+            target_peak = 0.9
+            target_rms = 0.08  # ~‑22 dBFS equivalent, tuned for bedtime listening
+            max_gain = 8.0     # safety limit so we don't over‑boost noisy recordings
+
+            gain_candidates = []
+            if rms > 1e-6:
+                gain_candidates.append(target_rms / rms)
+            if max_amp > 1e-6:
+                gain_candidates.append(target_peak / max_amp)
+
+            gain = min(gain_candidates) if gain_candidates else 1.0
+            gain = max(0.1, min(gain, max_gain))  # clamp between 0.1x and max_gain
+
+            if abs(gain - 1.0) > 1e-3:
+                print(f"[tts] Applying loudness normalization, gain={gain:.2f}, "
+                      f"rms={rms:.4f}, peak={max_amp:.4f}")
+                final_wav = (final_wav * gain).astype(np.float32)
 
         buf = io.BytesIO()
         sf.write(buf, final_wav, SAMPLE_RATE, format="WAV")
