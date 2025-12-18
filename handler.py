@@ -193,6 +193,10 @@ def generate_tts_handler(job):
         exaggeration = float(inp.get("exaggeration", 0.5))
         temperature = float(inp.get("temperature", 0.7))
         cfg_weight = float(inp.get("cfg_weight", 0.5))
+
+        # Use character-based chunking (default ~180 chars) to keep each TTS call
+        # reasonably short and avoid very long generations that can trigger the
+        # model's early‑stopping heuristics.
         max_chunk_chars = int(inp.get("max_chunk_chars", 180))
         pause_ms = int(inp.get("pause_ms", 300))
 
@@ -209,7 +213,7 @@ def generate_tts_handler(job):
         sentences = split_sentences(text)
         chunks = chunk_sentences(sentences, max_chars=max_chunk_chars)
 
-        print(f"[tts] Created {len(chunks)} chunks")
+        print(f"[tts] Created {len(chunks)} chunks (max_chunk_chars={max_chunk_chars})")
 
         if not chunks:
             return {"error": "No text to process"}
@@ -262,9 +266,35 @@ def generate_tts_handler(job):
 
         final_wav = stitch_chunks(audio_chunks, pause_ms=pause_ms)
 
-        max_amp = np.max(np.abs(final_wav))
-        if max_amp > 0.9:
-            final_wav = final_wav * (0.9 / max_amp)
+        # --- Loudness normalization so presets and user voices are closer in level ---
+        # More conservative: 
+        # - Only turn DOWN if peak is too hot
+        # - Only gently turn UP if audio is clearly too quiet
+        if len(final_wav) > 0:
+            max_amp = np.max(np.abs(final_wav))
+            rms = float(np.sqrt(np.mean(final_wav ** 2)))
+
+            target_peak = 0.9
+            target_rms = 0.05   # aim for ~-26 dBFS average loudness
+            max_gain = 1.8      # at most ~ +5 dB boost
+
+            gain = 1.0
+
+            # If peak is too high, reduce to target_peak
+            if max_amp > 1e-6 and max_amp > target_peak:
+                gain = min(gain, target_peak / max_amp)
+
+            # If overall RMS is very low, gently boost, but never above max_gain
+            if rms > 1e-6 and rms < target_rms:
+                gain = min(max_gain, max(gain, target_rms / rms))
+
+            # Clamp to a safe range
+            gain = max(0.1, min(gain, max_gain))
+
+            if abs(gain - 1.0) > 1e-3:
+                print(f"[tts] Applying loudness normalization, gain={gain:.2f}, "
+                      f"rms={rms:.4f}, peak={max_amp:.4f}")
+                final_wav = (final_wav * gain).astype(np.float32)
 
         buf = io.BytesIO()
         sf.write(buf, final_wav, SAMPLE_RATE, format="WAV")
