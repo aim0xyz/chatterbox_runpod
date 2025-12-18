@@ -193,7 +193,11 @@ def generate_tts_handler(job):
         exaggeration = float(inp.get("exaggeration", 0.5))
         temperature = float(inp.get("temperature", 0.7))
         cfg_weight = float(inp.get("cfg_weight", 0.5))
-        max_chunk_chars = int(inp.get("max_chunk_chars", 180))
+
+        # If max_chunk_chars <= 0 (default), synthesize the whole story in ONE chunk.
+        # This avoids inter‑chunk artifacts like different timbre or pops at boundaries.
+        # If a positive value is provided, we fall back to the old chunking behaviour.
+        max_chunk_chars = int(inp.get("max_chunk_chars", 0) or 0)
         pause_ms = int(inp.get("pause_ms", 300))
 
         print(f"[tts] Text length: {len(text)}")
@@ -207,9 +211,15 @@ def generate_tts_handler(job):
 
         text = clean_text(text)
         sentences = split_sentences(text)
-        chunks = chunk_sentences(sentences, max_chars=max_chunk_chars)
 
-        print(f"[tts] Created {len(chunks)} chunks")
+        if max_chunk_chars <= 0:
+            # NEW DEFAULT: single, long chunk for smoother audio
+            chunks = [" ".join(sentences)] if sentences else [text]
+        else:
+            # Legacy behaviour: split into multiple chunks by character length
+            chunks = chunk_sentences(sentences, max_chars=max_chunk_chars)
+
+        print(f"[tts] Created {len(chunks)} chunks (max_chunk_chars={max_chunk_chars})")
 
         if not chunks:
             return {"error": "No text to process"}
