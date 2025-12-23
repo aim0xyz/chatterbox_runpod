@@ -532,15 +532,69 @@ def clone_voice_handler(job):
         final_path = user_dir / final_name
 
         try:
+            # Convert uploaded audio to 24 kHz mono WAV for cloning
             subprocess.run([
                 "ffmpeg", "-y", "-i", str(temp_path),
-                "-ar", "24000", "-ac", "1", str(final_path)
+                "-ar", str(SAMPLE_RATE), "-ac", "1", str(final_path)
             ], check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
             temp_path.unlink(missing_ok=True)
             return {"error": f"FFmpeg failed: {e.stderr.decode() if e.stderr else str(e)}"}
 
+        # We no longer need the temp container file
         temp_path.unlink(missing_ok=True)
+
+        # --- Normalize recorded voice loudness for better cloning quality ---
+        try:
+            if final_path.exists():
+                print(f"[clone] Normalizing recording loudness for {final_name}")
+                wav, sr = sf.read(str(final_path), always_2d=False)
+
+                # Ensure mono
+                if wav.ndim > 1:
+                    wav = np.mean(wav, axis=1)
+
+                # Convert to float32 in [-1, 1]
+                if wav.dtype != np.float32:
+                    wav = wav.astype(np.float32)
+
+                # Compute RMS
+                rms = float(np.sqrt(np.mean(wav ** 2))) if len(wav) > 0 else 0.0
+                print(f"[clone]   Original RMS={rms:.4f}, samples={len(wav)}, sr={sr}")
+
+                if rms > 0.0:
+                    # Target a fairly strong but safe RMS so user voices don't sound too quiet.
+                    target_rms = 0.18  # ~-15 dBFS
+                    gain = target_rms / rms
+
+                    # Only boost; don't attenuate louder recordings here
+                    if gain < 1.0:
+                        gain = 1.0
+
+                    # Cap gain to avoid extreme amplification/noise
+                    max_gain = 4.0  # ~+12 dB
+                    if gain > max_gain:
+                        gain = max_gain
+
+                    print(f"[clone]   Applying gain={gain:.2f} to recording")
+                    wav *= gain
+
+                    # Hard clip to safe range
+                    wav = np.clip(wav, -0.999, 0.999).astype(np.float32)
+
+                    # Save back as WAV with original or SAMPLE_RATE
+                    out_sr = sr if sr and sr > 0 else SAMPLE_RATE
+                    sf.write(str(final_path), wav, out_sr, format="WAV")
+
+                    # Log final RMS
+                    final_rms = float(np.sqrt(np.mean(wav ** 2))) if len(wav) > 0 else 0.0
+                    print(f"[clone]   Normalized RMS={final_rms:.4f} (target={target_rms:.2f})")
+                else:
+                    print(f"[clone]   RMS is zero, skipping normalization for {final_name}")
+        except Exception as e:
+            # Don't fail the whole clone if normalization has issues
+            print(f"[clone] ⚠️ Error normalizing recording loudness: {e}")
+            traceback.print_exc()
 
         print(f"[clone] Saved: {final_name}")
 
