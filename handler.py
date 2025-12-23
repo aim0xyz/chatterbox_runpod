@@ -155,25 +155,152 @@ def to_numpy(x):
         arr = np.asarray(x)
     return np.squeeze(arr).flatten().astype(np.float32)
 
-def apply_fade(wav, fade_ms=20):
-    if len(wav) < 100:
+def apply_fade(wav, fade_ms=50):
+    """Apply smoother fade in/out to reduce clicks and pops."""
+    if len(wav) < 200:
         return wav
     wav = wav.copy()
     fade_samples = min(int(SAMPLE_RATE * fade_ms / 1000), len(wav) // 4)
     if fade_samples > 0:
-        wav[:fade_samples] *= np.linspace(0, 1, fade_samples).astype(np.float32)
-        wav[-fade_samples:] *= np.linspace(1, 0, fade_samples).astype(np.float32)
+        # Use cosine curve for smoother fade (ease in/out)
+        fade_in = np.cos(np.linspace(np.pi, 0, fade_samples))
+        fade_in = (1 - fade_in) / 2  # Normalize to 0-1
+        fade_out = np.cos(np.linspace(0, np.pi, fade_samples))
+        fade_out = (1 - fade_out) / 2  # Normalize to 0-1
+        
+        wav[:fade_samples] *= fade_in.astype(np.float32)
+        wav[-fade_samples:] *= fade_out.astype(np.float32)
     return wav
 
-def stitch_chunks(audio_list, pause_ms=300):
+def normalize_chunk(wav, target_rms=0.12):
+    """Normalize a single chunk to target RMS level for consistency."""
+    if len(wav) == 0:
+        return wav
+    rms = float(np.sqrt(np.mean(wav ** 2)))
+    if rms > 1e-6:
+        gain = min(2.0, max(0.5, target_rms / rms))  # Clamp gain to reasonable range
+        wav = (wav * gain).astype(np.float32)
+        # Prevent clipping
+        max_amp = np.max(np.abs(wav))
+        if max_amp > 0.95:
+            wav = wav * (0.95 / max_amp)
+    return wav
+
+def apply_high_pass_filter(wav, cutoff_hz=80):
+    """Apply a gentle high-pass filter to remove low-frequency artifacts."""
+    if len(wav) < 100:
+        return wav
+    
+    # Simple first-order high-pass filter (IIR)
+    # This removes DC offset and very low-frequency rumble
+    alpha = 1.0 / (1.0 + 2 * np.pi * cutoff_hz / SAMPLE_RATE)
+    filtered = np.zeros_like(wav)
+    filtered[0] = wav[0]
+    for i in range(1, len(wav)):
+        filtered[i] = alpha * (filtered[i-1] + wav[i] - wav[i-1])
+    return filtered.astype(np.float32)
+
+def crossfade(audio1, audio2, crossfade_ms=50):
+    """Smoothly crossfade between two audio segments with longer overlap."""
+    crossfade_samples = int(SAMPLE_RATE * crossfade_ms / 1000)
+    if len(audio1) < crossfade_samples or len(audio2) < crossfade_samples:
+        return np.concatenate([audio1, audio2])
+    
+    # Use longer crossfade with smoother curves (raised cosine)
+    # This creates a more natural-sounding transition
+    t = np.linspace(0, 1, crossfade_samples)
+    fade_out = 0.5 * (1 + np.cos(np.pi * t))  # Raised cosine fade out
+    fade_in = 0.5 * (1 - np.cos(np.pi * t))    # Raised cosine fade in
+    
+    # Apply crossfade
+    audio1_end = audio1[-crossfade_samples:] * fade_out
+    audio2_start = audio2[:crossfade_samples] * fade_in
+    
+    # Combine with energy normalization to prevent volume jumps
+    combined = audio1_end + audio2_start
+    # Normalize to prevent clipping
+    max_amp = np.max(np.abs(combined))
+    if max_amp > 0.95:
+        combined = combined * (0.95 / max_amp)
+    
+    # Concatenate: audio1 (without end) + crossfaded + audio2 (without start)
+    return np.concatenate([
+        audio1[:-crossfade_samples],
+        combined,
+        audio2[crossfade_samples:]
+    ]).astype(np.float32)
+
+def stitch_chunks(audio_list, pause_ms=100):
+    """Stitch audio chunks with seamless crossfading and minimal pauses."""
     if not audio_list:
         return np.array([], dtype=np.float32)
-    if len(audio_list) == 1:
-        return apply_fade(audio_list[0])
-    pause = np.zeros(int(SAMPLE_RATE * pause_ms / 1000), dtype=np.float32)
-    result = apply_fade(audio_list[0])
-    for chunk in audio_list[1:]:
-        result = np.concatenate([result, pause, apply_fade(chunk)])
+    
+    print(f"[stitch] Stitching {len(audio_list)} chunks with {pause_ms}ms pause")
+    
+    # Normalize each chunk individually for consistent volume
+    normalized_chunks = []
+    for i, chunk in enumerate(audio_list):
+        # Apply high-pass filter first to remove low-frequency artifacts
+        filtered = apply_high_pass_filter(chunk.copy())
+        rms_before = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
+        normalized = normalize_chunk(filtered)
+        rms_after = float(np.sqrt(np.mean(normalized ** 2))) if len(normalized) > 0 else 0.0
+        # Longer fade for smoother edges
+        faded = apply_fade(normalized, fade_ms=80)
+        normalized_chunks.append(faded)
+        if i < 3:  # Log first few chunks for debugging
+            print(f"[stitch] Chunk {i+1}: {len(chunk)} samples, RMS {rms_before:.4f} -> {rms_after:.4f}")
+    
+    if len(normalized_chunks) == 1:
+        return normalized_chunks[0]
+    
+    # Stitch with seamless crossfading and minimal pauses
+    result = normalized_chunks[0]
+    pause_samples = int(SAMPLE_RATE * pause_ms / 1000)
+    
+    for i, chunk in enumerate(normalized_chunks[1:], 1):
+        # For seamless stitching, we can either:
+        # 1. Use very short pause with crossfade (current approach)
+        # 2. Direct crossfade with no pause (even smoother)
+        
+        # Option: Direct crossfade for maximum smoothness (no pause)
+        # Uncomment the next line and comment out the pause section to try this:
+        # result = crossfade(result, chunk, crossfade_ms=60)
+        
+        # Current: Short pause with crossfade
+        if pause_samples > 0:
+            # Create a very short pause with gentle fade in/out
+            pause = np.zeros(pause_samples, dtype=np.float32)
+            # Fade out the end of previous chunk into pause
+            fade_out_samples = min(30, len(result) // 10)
+            if fade_out_samples > 0:
+                fade_out = np.linspace(1.0, 0.1, fade_out_samples)
+                result[-fade_out_samples:] *= fade_out.astype(np.float32)
+            
+            result = np.concatenate([result, pause])
+        
+        # Crossfade into next chunk with longer overlap for seamless transition
+        if len(result) > 0 and len(chunk) > 0:
+            result = crossfade(result, chunk, crossfade_ms=60)  # Increased from 30ms to 60ms
+        else:
+            result = np.concatenate([result, chunk])
+    
+    # Final pass: apply gentle smoothing to the entire result to remove any remaining artifacts
+    # This is a very gentle low-pass filter to smooth out any remaining discontinuities
+    if len(result) > 200:
+        # Simple moving average for gentle smoothing (only on transitions)
+        smoothed = result.copy()
+        window = 5  # Very small window to preserve audio quality
+        for i in range(window, len(smoothed) - window):
+            # Only smooth if there's a significant change (potential artifact)
+            local_variance = np.var(result[i-window:i+window])
+            if local_variance > 0.01:  # Only smooth high-variance areas (transitions)
+                smoothed[i] = np.mean(result[i-window:i+window+1])
+        result = smoothed.astype(np.float32)
+    
+    final_rms = float(np.sqrt(np.mean(result ** 2))) if len(result) > 0 else 0.0
+    final_peak = float(np.max(np.abs(result))) if len(result) > 0 else 0.0
+    print(f"[stitch] Final stitched audio: {len(result)} samples, RMS: {final_rms:.4f}, Peak: {final_peak:.4f}")
     return result
 
 def generate_tts_handler(job):
@@ -189,6 +316,9 @@ def generate_tts_handler(job):
         
         # Language parameter - default to English
         language = inp.get("language", "en")
+        
+        # Volume normalization parameter - default to True for backward compatibility
+        normalize_volume = inp.get("normalize_volume", True)
 
         exaggeration = float(inp.get("exaggeration", 0.5))
         temperature = float(inp.get("temperature", 0.7))
@@ -198,7 +328,7 @@ def generate_tts_handler(job):
         # reasonably short and avoid very long generations that can trigger the
         # model's early‑stopping heuristics.
         max_chunk_chars = int(inp.get("max_chunk_chars", 180))
-        pause_ms = int(inp.get("pause_ms", 300))
+        pause_ms = int(inp.get("pause_ms", 100))  # Minimal pause for seamless transitions
 
         print(f"[tts] Text length: {len(text)}")
         print(f"[tts] Language: {language}")
@@ -266,17 +396,29 @@ def generate_tts_handler(job):
 
         final_wav = stitch_chunks(audio_chunks, pause_ms=pause_ms)
 
-        # --- Loudness normalization so presets and user voices are closer in level ---
-        # More conservative: 
-        # - Only turn DOWN if peak is too hot
-        # - Only gently turn UP if audio is clearly too quiet
-        if len(final_wav) > 0:
+        # --- Volume normalization (server-side) ---
+        # Normalizes audio to consistent loudness levels
+        # More aggressive for user voices which tend to be quieter
+        if normalize_volume and len(final_wav) > 0:
             max_amp = np.max(np.abs(final_wav))
             rms = float(np.sqrt(np.mean(final_wav ** 2)))
 
-            target_peak = 0.9
-            target_rms = 0.05   # aim for ~-26 dBFS average loudness
-            max_gain = 1.8      # at most ~ +5 dB boost
+            # Determine if this is a user voice (more aggressive normalization needed)
+            is_user_voice = user_id is not None and embedding_filename is not None
+            
+            # More aggressive targets for better normalization
+            # User voices typically need more boost
+            if is_user_voice:
+                target_peak = 0.95  # Allow slightly higher peaks for user voices
+                target_rms = 0.15  # Higher target RMS for user voices (~-16 dBFS)
+                max_gain = 3.0      # Allow up to ~+10 dB boost for very quiet user voices
+                min_gain = 0.3     # Can reduce very loud audio more
+            else:
+                # Preset voices - more conservative
+                target_peak = 0.9
+                target_rms = 0.12  # Higher than before (~-18 dBFS)
+                max_gain = 2.5     # Allow more boost than before
+                min_gain = 0.4
 
             gain = 1.0
 
@@ -284,17 +426,31 @@ def generate_tts_handler(job):
             if max_amp > 1e-6 and max_amp > target_peak:
                 gain = min(gain, target_peak / max_amp)
 
-            # If overall RMS is very low, gently boost, but never above max_gain
+            # If overall RMS is low, boost to target_rms
             if rms > 1e-6 and rms < target_rms:
-                gain = min(max_gain, max(gain, target_rms / rms))
+                calculated_gain = target_rms / rms
+                # For very quiet audio (RMS < 0.05), apply extra boost
+                if rms < 0.05:
+                    calculated_gain *= 1.3  # Extra 30% boost for very quiet audio
+                gain = min(max_gain, max(gain, calculated_gain))
 
-            # Clamp to a safe range
-            gain = max(0.1, min(gain, max_gain))
+            # Clamp to safe range
+            gain = max(min_gain, min(gain, max_gain))
 
             if abs(gain - 1.0) > 1e-3:
-                print(f"[tts] Applying loudness normalization, gain={gain:.2f}, "
-                      f"rms={rms:.4f}, peak={max_amp:.4f}")
+                voice_type = "user voice" if is_user_voice else "preset voice"
+                print(f"[tts] Applying volume normalization ({voice_type}), gain={gain:.2f}, "
+                      f"rms={rms:.4f}, peak={max_amp:.4f}, target_rms={target_rms:.3f}")
                 final_wav = (final_wav * gain).astype(np.float32)
+                
+                # Ensure we don't clip after gain application
+                max_after = np.max(np.abs(final_wav))
+                if max_after > 0.99:
+                    # Soft limit to prevent clipping
+                    final_wav = final_wav * (0.99 / max_after)
+                    print(f"[tts] Applied soft limiter to prevent clipping (peak was {max_after:.3f})")
+        elif not normalize_volume:
+            print(f"[tts] Volume normalization disabled by request")
 
         buf = io.BytesIO()
         sf.write(buf, final_wav, SAMPLE_RATE, format="WAV")
