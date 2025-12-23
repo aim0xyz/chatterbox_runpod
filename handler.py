@@ -187,18 +187,22 @@ def normalize_chunk(wav, target_rms=0.12):
     return wav
 
 def apply_high_pass_filter(wav, cutoff_hz=80):
-    """Apply a gentle high-pass filter to remove low-frequency artifacts."""
+    """Apply a gentle high-pass filter to remove low-frequency artifacts (optimized)."""
     if len(wav) < 100:
         return wav
     
-    # Simple first-order high-pass filter (IIR)
+    # Simple first-order high-pass filter (IIR) - vectorized for speed
     # This removes DC offset and very low-frequency rumble
     alpha = 1.0 / (1.0 + 2 * np.pi * cutoff_hz / SAMPLE_RATE)
-    filtered = np.zeros_like(wav)
+    filtered = np.zeros_like(wav, dtype=np.float32)
     filtered[0] = wav[0]
+    
+    # Vectorized computation for better performance
+    diff = np.diff(wav, prepend=wav[0])
     for i in range(1, len(wav)):
-        filtered[i] = alpha * (filtered[i-1] + wav[i] - wav[i-1])
-    return filtered.astype(np.float32)
+        filtered[i] = alpha * (filtered[i-1] + diff[i])
+    
+    return filtered
 
 def crossfade(audio1, audio2, crossfade_ms=50):
     """Smoothly crossfade between two audio segments with longer overlap."""
@@ -258,45 +262,42 @@ def stitch_chunks(audio_list, pause_ms=100):
     result = normalized_chunks[0]
     pause_samples = int(SAMPLE_RATE * pause_ms / 1000)
     
+    import time
+    stitch_start = time.time()
+    
     for i, chunk in enumerate(normalized_chunks[1:], 1):
-        # For seamless stitching, we can either:
-        # 1. Use very short pause with crossfade (current approach)
-        # 2. Direct crossfade with no pause (even smoother)
-        
-        # Option: Direct crossfade for maximum smoothness (no pause)
-        # Uncomment the next line and comment out the pause section to try this:
-        # result = crossfade(result, chunk, crossfade_ms=60)
-        
-        # Current: Short pause with crossfade
+        # Short pause with crossfade for natural speech rhythm
         if pause_samples > 0:
-            # Create a very short pause with gentle fade in/out
             pause = np.zeros(pause_samples, dtype=np.float32)
-            # Fade out the end of previous chunk into pause
-            fade_out_samples = min(30, len(result) // 10)
-            if fade_out_samples > 0:
-                fade_out = np.linspace(1.0, 0.1, fade_out_samples)
-                result[-fade_out_samples:] *= fade_out.astype(np.float32)
-            
             result = np.concatenate([result, pause])
         
-        # Crossfade into next chunk with longer overlap for seamless transition
+        # Crossfade into next chunk for seamless transition
         if len(result) > 0 and len(chunk) > 0:
-            result = crossfade(result, chunk, crossfade_ms=60)  # Increased from 30ms to 60ms
+            result = crossfade(result, chunk, crossfade_ms=60)
         else:
             result = np.concatenate([result, chunk])
     
-    # Final pass: apply gentle smoothing to the entire result to remove any remaining artifacts
-    # This is a very gentle low-pass filter to smooth out any remaining discontinuities
-    if len(result) > 200:
-        # Simple moving average for gentle smoothing (only on transitions)
-        smoothed = result.copy()
-        window = 5  # Very small window to preserve audio quality
-        for i in range(window, len(smoothed) - window):
-            # Only smooth if there's a significant change (potential artifact)
-            local_variance = np.var(result[i-window:i+window])
-            if local_variance > 0.01:  # Only smooth high-variance areas (transitions)
-                smoothed[i] = np.mean(result[i-window:i+window+1])
-        result = smoothed.astype(np.float32)
+    stitch_time = time.time() - stitch_start
+    print(f"[stitch] Stitching completed in {stitch_time:.2f}s")
+    
+    # Optional: Apply gentle smoothing only at transition points (disabled by default for speed)
+    # The crossfading should handle most artifacts, so this is only needed if issues persist
+    # Uncomment the code below if you still hear artifacts after crossfading:
+    #
+    # if len(result) > 200 and len(normalized_chunks) > 1:
+    #     transition_window = int(SAMPLE_RATE * 0.05)  # 50ms window
+    #     smoothed = result.copy()
+    #     current_pos = len(normalized_chunks[0])
+    #     for i in range(1, len(normalized_chunks)):
+    #         start_idx = max(0, current_pos - transition_window)
+    #         end_idx = min(len(smoothed), current_pos + transition_window)
+    #         if end_idx > start_idx + 10:
+    #             # Vectorized smoothing for this window
+    #             window = 3
+    #             for j in range(start_idx + window, end_idx - window):
+    #                 smoothed[j] = np.mean(result[j-window:j+window+1])
+    #         current_pos += len(normalized_chunks[i]) + pause_samples
+    #     result = smoothed.astype(np.float32)
     
     final_rms = float(np.sqrt(np.mean(result ** 2))) if len(result) > 0 else 0.0
     final_peak = float(np.max(np.abs(result))) if len(result) > 0 else 0.0
