@@ -56,11 +56,25 @@ def load_model(language="en"):
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
+    # Enable CUDA optimizations for faster inference
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
+        torch.backends.cudnn.deterministic = False  # Allow non-deterministic algorithms for speed
+        print(f"[model] CUDA optimizations enabled")
+    
     # Use multilingual model for non-English languages
     if language != "en" and ChatterboxMTL is not None:
         if model_multilingual is None:
             print(f"[model] Loading MULTILINGUAL model on {device}...")
             model_multilingual = ChatterboxMTL.from_pretrained(device)
+            # Compile model for faster inference (PyTorch 2.0+)
+            try:
+                if hasattr(torch, 'compile') and device == "cuda":
+                    print("[model] Compiling model for faster inference...")
+                    model_multilingual = torch.compile(model_multilingual, mode="reduce-overhead")
+                    print("[model] Model compiled successfully")
+            except Exception as e:
+                print(f"[model] Model compilation skipped: {e}")
             print("[model] Multilingual model loaded")
         return model_multilingual, "multilingual"
     
@@ -70,6 +84,14 @@ def load_model(language="en"):
             raise RuntimeError("No TTS model available")
         print(f"[model] Loading ENGLISH model on {device}...")
         model_english = Chatterbox.from_pretrained(device)
+        # Compile model for faster inference (PyTorch 2.0+)
+        try:
+            if hasattr(torch, 'compile') and device == "cuda":
+                print("[model] Compiling model for faster inference...")
+                model_english = torch.compile(model_english, mode="reduce-overhead")
+                print("[model] Model compiled successfully")
+        except Exception as e:
+            print(f"[model] Model compilation skipped: {e}")
         print("[model] English model loaded")
     return model_english, "english"
 
@@ -354,8 +376,12 @@ def generate_tts_handler(job):
         print(f"[tts] Using {model_type} model for language: {language}")
         
         audio_chunks = []
+        
+        import time
+        total_gen_start = time.time()
 
         for i, chunk_text in enumerate(chunks):
+            chunk_start = time.time()
             print(f"[tts] Generating chunk {i+1}/{len(chunks)}: {chunk_text[:50]}...")
             try:
                 seed = (12345 + i * 9973) & 0xFFFFFFFF
@@ -363,34 +389,40 @@ def generate_tts_handler(job):
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed_all(seed)
 
-                # Different generate call based on model type
-                if model_type == "multilingual":
-                    output = tts.generate(
-                        text=chunk_text,
-                        audio_prompt_path=str(voice_path),
-                        language_id=language,
-                        exaggeration=exaggeration,
-                        temperature=temperature,
-                        cfg_weight=cfg_weight,
-                    )
-                else:
-                    # English model doesn't use language_id
-                    output = tts.generate(
-                        text=chunk_text,
-                        audio_prompt_path=str(voice_path),
-                        exaggeration=exaggeration,
-                        temperature=temperature,
-                        cfg_weight=cfg_weight,
-                    )
+                # Use inference_mode for faster inference (no gradient tracking)
+                with torch.inference_mode():
+                    # Different generate call based on model type
+                    if model_type == "multilingual":
+                        output = tts.generate(
+                            text=chunk_text,
+                            audio_prompt_path=str(voice_path),
+                            language_id=language,
+                            exaggeration=exaggeration,
+                            temperature=temperature,
+                            cfg_weight=cfg_weight,
+                        )
+                    else:
+                        # English model doesn't use language_id
+                        output = tts.generate(
+                            text=chunk_text,
+                            audio_prompt_path=str(voice_path),
+                            exaggeration=exaggeration,
+                            temperature=temperature,
+                            cfg_weight=cfg_weight,
+                        )
 
                 wav = to_numpy(output)
-                print(f"[tts]   Generated {len(wav)} samples")
+                chunk_time = time.time() - chunk_start
+                print(f"[tts]   Generated {len(wav)} samples in {chunk_time:.2f}s")
 
                 if len(wav) > 0:
                     audio_chunks.append(wav)
             except Exception as e:
                 print(f"[tts]   Error: {e}")
                 traceback.print_exc()
+        
+        total_gen_time = time.time() - total_gen_start
+        print(f"[tts] Total generation time: {total_gen_time:.2f}s ({total_gen_time/len(chunks):.2f}s per chunk)")
 
         if not audio_chunks:
             return {"error": "No audio generated"}
