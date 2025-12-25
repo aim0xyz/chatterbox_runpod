@@ -7,6 +7,7 @@ import random
 import subprocess
 import sys
 import traceback
+import json
 from pathlib import Path
 
 import runpod
@@ -115,6 +116,40 @@ def find_voice(user_id=None, filename=None, preset=None):
         if p.exists():
             return p
     return None
+
+def get_voice_language(user_id=None, filename=None):
+    """Get the stored language for a voice file from metadata."""
+    if not user_id or not filename:
+        return None
+    
+    try:
+        user_dir = get_user_dir(user_id)
+        # Look for metadata file: voice_name.json
+        voice_name = Path(filename).stem  # Remove extension
+        metadata_path = user_dir / f"{voice_name}.json"
+        
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+                return metadata.get("language")
+    except Exception as e:
+        print(f"[voice_lang] Error reading voice metadata: {e}")
+    
+    return None
+
+def save_voice_language(user_id, filename, language):
+    """Save the language metadata for a voice file."""
+    try:
+        user_dir = get_user_dir(user_id)
+        voice_name = Path(filename).stem  # Remove extension
+        metadata_path = user_dir / f"{voice_name}.json"
+        
+        metadata = {"language": language, "filename": filename}
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f)
+        print(f"[voice_lang] Saved language metadata: {language} for {filename}")
+    except Exception as e:
+        print(f"[voice_lang] Error saving voice metadata: {e}")
 
 def clean_text(text):
     replacements = {
@@ -340,6 +375,53 @@ def generate_tts_handler(job):
         # Language parameter - default to English
         language = inp.get("language", "en")
         
+        # Voice language parameter - language of the voice sample (for accent control)
+        # First try to get from input parameter, then try to auto-detect from stored metadata,
+        # finally default to target language
+        voice_language = inp.get("voice_language")
+        
+        # Auto-detect from stored metadata if not provided
+        if voice_language is None and user_id and embedding_filename:
+            stored_language = get_voice_language(user_id, embedding_filename)
+            if stored_language:
+                voice_language = stored_language
+                print(f"[tts] Auto-detected voice language from metadata: {voice_language}")
+        
+        # Default to target language if still not found
+        if voice_language is None:
+            voice_language = language
+            print(f"[tts] Voice language not specified, defaulting to target language: {language}")
+        
+        # Automatic accent control based on language matching:
+        # - If voice_language == language: preserve voice accent (same language, keep natural accent)
+        # - If voice_language != language: use target language accent (different language, prioritize target)
+        # This can be overridden by explicitly setting preserve_voice_accent
+        languages_match = voice_language == language
+        
+        # Preserve voice accent parameter - if True, keeps the accent from the voice sample
+        # (e.g., grandma's German accent even when generating English text)
+        # If False, uses target language accent (default behavior for cross-language)
+        # Auto-detect: preserve accent when languages match, use target accent when they differ
+        if "preserve_voice_accent" in inp:
+            # Explicitly set by user
+            preserve_voice_accent = bool(inp.get("preserve_voice_accent", False))
+        else:
+            # Auto-detect: preserve accent when languages match
+            preserve_voice_accent = languages_match
+        
+        # Accent control parameter - controls how much to prioritize target language accent
+        # vs voice sample accent (0.0 = use voice accent, 1.0 = prioritize target language accent)
+        # If preserve_voice_accent is True, accent_control is set to 0.0
+        # Default: 0.85 (strong accent control when different from voice) for consistent storytelling
+        # But if preserve_voice_accent is True, use 0.0 to keep the voice's natural accent
+        if preserve_voice_accent:
+            accent_control = 0.0
+            print(f"[tts] ✅ Auto-detected: Preserving voice accent (languages match: {voice_language} == {language})")
+        else:
+            accent_control = float(inp.get("accent_control", 0.85 if not languages_match else 0.0))
+            if not languages_match:
+                print(f"[tts] ⚠️  Auto-detected: Using target language accent (languages differ: {voice_language} != {language})")
+        
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
 
@@ -354,7 +436,13 @@ def generate_tts_handler(job):
         pause_ms = int(inp.get("pause_ms", 100))  # Minimal pause for seamless transitions
 
         print(f"[tts] Text length: {len(text)}")
-        print(f"[tts] Language: {language}")
+        print(f"[tts] Target language: {language}")
+        print(f"[tts] Voice sample language: {voice_language}")
+        if languages_match:
+            print(f"[tts] ✅ Languages match ({voice_language} == {language}): Preserving voice accent automatically")
+        else:
+            print(f"[tts] ⚠️  Languages differ ({voice_language} != {language}): Using target language accent automatically")
+            print(f"[tts] Accent control: {accent_control:.2f} (will prioritize {language} accent for consistency)")
 
         voice_path = find_voice(user_id, embedding_filename, preset_voice)
         if not voice_path:
@@ -375,6 +463,34 @@ def generate_tts_handler(job):
         tts, model_type = load_model(language)
         print(f"[tts] Using {model_type} model for language: {language}")
         
+        # Calculate accent control adjustments ONCE before the loop for consistency
+        # This ensures all chunks use the same parameters and produce consistent accent
+        base_temperature = temperature
+        base_cfg_weight = cfg_weight
+        base_exaggeration = exaggeration
+        
+        if model_type == "multilingual" and voice_language != language:
+            if preserve_voice_accent or accent_control < 0.1:
+                # Preserve voice accent: use original parameters to keep voice's natural accent
+                # No adjustments needed - let the voice embedding control the accent
+                print(f"[tts] Preserving voice accent: using original parameters to keep {voice_language} accent")
+                print(f"[tts] Parameters: temp={base_temperature:.2f}, cfg={base_cfg_weight:.2f}, exaggeration={base_exaggeration:.2f}")
+            elif accent_control > 0.0:
+                # More aggressive adjustments for consistent target language accent across all chunks
+                # Higher temperature = more variation = less voice accent influence
+                base_temperature = min(temperature + (accent_control * 0.3), 1.0)
+                
+                # Lower cfg_weight = less voice embedding influence = more language model control
+                base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.4), 0.15)
+                
+                # Slightly reduce exaggeration to make accent more consistent
+                base_exaggeration = exaggeration * (1.0 - accent_control * 0.1)
+                
+                print(f"[tts] Accent control active: temp={base_temperature:.2f} (was {temperature:.2f}), "
+                      f"cfg={base_cfg_weight:.2f} (was {cfg_weight:.2f}), "
+                      f"exaggeration={base_exaggeration:.2f} (was {exaggeration:.2f})")
+                print(f"[tts] These parameters will be applied consistently to ALL chunks")
+        
         audio_chunks = []
         
         import time
@@ -384,6 +500,8 @@ def generate_tts_handler(job):
             chunk_start = time.time()
             print(f"[tts] Generating chunk {i+1}/{len(chunks)}: {chunk_text[:50]}...")
             try:
+                # Use consistent seed per chunk for reproducibility, but ensure accent control
+                # parameters are the same across all chunks
                 seed = (12345 + i * 9973) & 0xFFFFFFFF
                 torch.manual_seed(seed)
                 if torch.cuda.is_available():
@@ -393,13 +511,14 @@ def generate_tts_handler(job):
                 with torch.inference_mode():
                     # Different generate call based on model type
                     if model_type == "multilingual":
+                        # Use the pre-calculated accent-controlled parameters for consistency
                         output = tts.generate(
                             text=chunk_text,
                             audio_prompt_path=str(voice_path),
                             language_id=language,
-                            exaggeration=exaggeration,
-                            temperature=temperature,
-                            cfg_weight=cfg_weight,
+                            exaggeration=base_exaggeration,
+                            temperature=base_temperature,
+                            cfg_weight=base_cfg_weight,
                         )
                     else:
                         # English model doesn't use language_id
@@ -502,6 +621,9 @@ def generate_tts_handler(job):
             "chunks_generated": len(audio_chunks),
             "chunks_requested": len(chunks),
             "language": language,
+            "voice_language": voice_language,
+            "preserve_voice_accent": preserve_voice_accent,
+            "accent_control": accent_control,
             "model_type": model_type,
         }
 
@@ -516,11 +638,13 @@ def clone_voice_handler(job):
         audio_b64 = inp.get("audio_data")
         voice_name = inp.get("voice_name", "voice")
         user_id = inp.get("user_id", "anonymous")
+        # Language of the voice sample (for accent control)
+        voice_language = inp.get("voice_language", "en")  # Default to English if not specified
 
         if not audio_b64:
             return {"error": "audio_data is required"}
 
-        print(f"[clone] User: {user_id}, Voice: {voice_name}")
+        print(f"[clone] User: {user_id}, Voice: {voice_name}, Language: {voice_language}")
 
         user_dir = get_user_dir(user_id)
         temp_path = user_dir / f"temp_{uuid.uuid4().hex}.bin"
@@ -572,7 +696,9 @@ def clone_voice_handler(job):
                         gain = 1.0
 
                     # Cap gain to avoid extreme amplification/noise
-                    max_gain = 4.0  # ~+12 dB
+                    # Increased from 4.0 to 6.0 to handle very quiet recordings better
+                    # For RMS=0.0233, we need ~7.7x to reach 0.18, so 6.0x gets us closer (~0.14 RMS)
+                    max_gain = 6.0  # ~+15.6 dB (increased from +12 dB)
                     if gain > max_gain:
                         gain = max_gain
 
@@ -597,12 +723,16 @@ def clone_voice_handler(job):
             traceback.print_exc()
 
         print(f"[clone] Saved: {final_name}")
+        
+        # Save voice language metadata for automatic detection during TTS generation
+        save_voice_language(user_id, final_name, voice_language)
 
         return {
             "status": "success",
             "user_id": user_id,
             "embedding_filename": final_name,
             "voice_name": voice_name,
+            "voice_language": voice_language,  # Return the language for client reference
         }
 
     except Exception as e:
