@@ -686,9 +686,8 @@ def generate_tts_handler(job):
             print(f"[tts]   High-pass filter (100Hz) to remove low-frequency artifacts...")
             final_wav = apply_high_pass_filter(final_wav, cutoff_hz=100)
             
-            # Step 5: Apply low-pass filter to remove high-frequency artifacts (rubbing, scratching)
-            print(f"[tts]   Low-pass filter (10kHz) to remove high-frequency artifacts...")
-            final_wav = apply_low_pass_filter(final_wav, cutoff_hz=10000)
+            # Step 5: Low-pass filter removed - was making audio sound too dimmed/muffled
+            # If high-frequency artifacts are still an issue, we can add it back with a higher cutoff (e.g., 18kHz)
             
             # Step 6: Apply spectral gating to remove background noise and hiss
             print(f"[tts]   Spectral gating to remove background noise...")
