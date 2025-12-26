@@ -243,13 +243,14 @@ def normalize_chunk(wav, target_rms=0.12):
             wav = wav * (0.95 / max_amp)
     return wav
 
-def apply_high_pass_filter(wav, cutoff_hz=80):
-    """Apply a gentle high-pass filter to remove low-frequency artifacts (optimized)."""
+def apply_high_pass_filter(wav, cutoff_hz=100):
+    """Apply a high-pass filter to remove low-frequency artifacts (howling, rumble)."""
     if len(wav) < 100:
         return wav
     
     # Simple first-order high-pass filter (IIR) - vectorized for speed
-    # This removes DC offset and very low-frequency rumble
+    # Increased cutoff from 80Hz to 100Hz to better remove low-frequency artifacts
+    # This removes DC offset and very low-frequency rumble/howing
     alpha = 1.0 / (1.0 + 2 * np.pi * cutoff_hz / SAMPLE_RATE)
     filtered = np.zeros_like(wav, dtype=np.float32)
     filtered[0] = wav[0]
@@ -260,6 +261,124 @@ def apply_high_pass_filter(wav, cutoff_hz=80):
         filtered[i] = alpha * (filtered[i-1] + diff[i])
     
     return filtered
+
+def apply_low_pass_filter(wav, cutoff_hz=10000):
+    """Apply a low-pass filter to remove high-frequency artifacts (rubbing, scratching sounds)."""
+    if len(wav) < 100:
+        return wav
+    
+    # Simple first-order low-pass filter (IIR)
+    # Removes high-frequency artifacts above 10kHz that can sound like rubbing/scratching
+    # Speech is typically below 8kHz, so 10kHz cutoff preserves speech while removing artifacts
+    alpha = 2 * np.pi * cutoff_hz / SAMPLE_RATE / (1.0 + 2 * np.pi * cutoff_hz / SAMPLE_RATE)
+    filtered = np.zeros_like(wav, dtype=np.float32)
+    filtered[0] = wav[0]
+    
+    for i in range(1, len(wav)):
+        filtered[i] = alpha * wav[i] + (1.0 - alpha) * filtered[i-1]
+    
+    return filtered
+
+def remove_dc_offset(wav):
+    """Remove DC offset (constant bias) that can cause artifacts."""
+    if len(wav) == 0:
+        return wav
+    # Calculate mean (DC offset) and subtract it
+    dc_offset = np.mean(wav)
+    if abs(dc_offset) > 1e-6:
+        wav = wav - dc_offset
+    return wav.astype(np.float32)
+
+def apply_smoothing_filter(wav, window_size=5):
+    """Apply a simple moving average to reduce rapid amplitude changes and clicks."""
+    if len(wav) < window_size:
+        return wav
+    
+    # Use a simple moving average to smooth out rapid changes
+    # This helps reduce clicks, pops, and rapid amplitude jumps
+    smoothed = np.zeros_like(wav, dtype=np.float32)
+    half_window = window_size // 2
+    
+    # Handle edges
+    for i in range(half_window):
+        smoothed[i] = wav[i]
+    
+    # Apply moving average to middle samples
+    for i in range(half_window, len(wav) - half_window):
+        smoothed[i] = np.mean(wav[i - half_window:i + half_window + 1])
+    
+    # Handle edges
+    for i in range(len(wav) - half_window, len(wav)):
+        smoothed[i] = wav[i]
+    
+    return smoothed
+
+def apply_spectral_gating(wav, threshold_db=-40):
+    """Apply spectral gating to remove background noise and hiss."""
+    if len(wav) < 1000:
+        return wav
+    
+    # Calculate RMS in small windows to detect background noise
+    window_size = int(SAMPLE_RATE * 0.05)  # 50ms windows
+    num_windows = len(wav) // window_size
+    
+    if num_windows < 2:
+        return wav
+    
+    # Calculate RMS for each window
+    window_rms = []
+    for i in range(num_windows):
+        start = i * window_size
+        end = start + window_size
+        window = wav[start:end]
+        rms = float(np.sqrt(np.mean(window ** 2)))
+        window_rms.append(rms)
+    
+    # Estimate noise floor (use lower percentile of RMS values)
+    noise_floor = np.percentile(window_rms, 25)  # 25th percentile as noise floor
+    
+    # Convert threshold from dB to linear
+    threshold_linear = 10 ** (threshold_db / 20.0)
+    gate_threshold = max(noise_floor * 2, threshold_linear)  # At least 2x noise floor
+    
+    # Apply gating: reduce amplitude of quiet sections
+    gated = wav.copy().astype(np.float32)
+    for i in range(num_windows):
+        start = i * window_size
+        end = min(start + window_size, len(wav))
+        window_rms_val = window_rms[i]
+        
+        if window_rms_val < gate_threshold:
+            # Reduce amplitude of quiet sections (gate)
+            reduction = window_rms_val / gate_threshold
+            # Smooth reduction to avoid clicks
+            gated[start:end] *= (0.1 + 0.9 * reduction)  # Keep at least 10% to avoid silence
+    
+    return gated
+
+def detect_and_remove_clicks(wav, threshold=0.3):
+    """Detect and remove sudden amplitude spikes (clicks/pops)."""
+    if len(wav) < 10:
+        return wav
+    
+    # Calculate derivative to detect sudden changes
+    diff = np.abs(np.diff(wav, prepend=wav[0]))
+    
+    # Find samples with sudden amplitude changes
+    click_threshold = threshold * np.std(diff) + np.mean(diff)
+    click_indices = np.where(diff > click_threshold)[0]
+    
+    if len(click_indices) == 0:
+        return wav
+    
+    # Smooth out clicks by interpolating with neighbors
+    cleaned = wav.copy().astype(np.float32)
+    for idx in click_indices:
+        if 1 < idx < len(wav) - 1:
+            # Replace with average of neighbors
+            cleaned[idx] = (wav[idx - 1] + wav[idx + 1]) / 2.0
+    
+    return cleaned
 
 def crossfade(audio1, audio2, crossfade_ms=50):
     """Smoothly crossfade between two audio segments with longer overlap."""
@@ -301,8 +420,8 @@ def stitch_chunks(audio_list, pause_ms=100):
     # Normalize each chunk individually for consistent volume
     normalized_chunks = []
     for i, chunk in enumerate(audio_list):
-        # Apply high-pass filter first to remove low-frequency artifacts
-        filtered = apply_high_pass_filter(chunk.copy())
+        # Apply high-pass filter first to remove low-frequency artifacts (howling, rumble)
+        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
         rms_before = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
         normalized = normalize_chunk(filtered)
         rms_after = float(np.sqrt(np.mean(normalized ** 2))) if len(normalized) > 0 else 0.0
@@ -425,8 +544,10 @@ def generate_tts_handler(job):
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
 
+        # Slightly lower default temperature to reduce artifacts (howling, rubbing sounds)
+        # Lower temperature = more deterministic = fewer artifacts
         exaggeration = float(inp.get("exaggeration", 0.5))
-        temperature = float(inp.get("temperature", 0.7))
+        temperature = float(inp.get("temperature", 0.65))  # Reduced from 0.7 to 0.65
         cfg_weight = float(inp.get("cfg_weight", 0.5))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
@@ -547,6 +668,37 @@ def generate_tts_handler(job):
             return {"error": "No audio generated"}
 
         final_wav = stitch_chunks(audio_chunks, pause_ms=pause_ms)
+
+        # --- Apply comprehensive audio post-processing to reduce artifacts ---
+        if len(final_wav) > 0:
+            print(f"[tts] Applying audio post-processing to improve quality...")
+            
+            # Step 1: Remove DC offset (constant bias that can cause artifacts)
+            final_wav = remove_dc_offset(final_wav)
+            
+            # Step 2: Detect and remove clicks/pops (sudden amplitude spikes)
+            final_wav = detect_and_remove_clicks(final_wav, threshold=0.3)
+            
+            # Step 3: Apply smoothing to reduce rapid amplitude changes
+            final_wav = apply_smoothing_filter(final_wav, window_size=5)
+            
+            # Step 4: Apply high-pass filter to remove low-frequency artifacts (howling, rumble)
+            print(f"[tts]   High-pass filter (100Hz) to remove low-frequency artifacts...")
+            final_wav = apply_high_pass_filter(final_wav, cutoff_hz=100)
+            
+            # Step 5: Apply low-pass filter to remove high-frequency artifacts (rubbing, scratching)
+            print(f"[tts]   Low-pass filter (10kHz) to remove high-frequency artifacts...")
+            final_wav = apply_low_pass_filter(final_wav, cutoff_hz=10000)
+            
+            # Step 6: Apply spectral gating to remove background noise and hiss
+            print(f"[tts]   Spectral gating to remove background noise...")
+            final_wav = apply_spectral_gating(final_wav, threshold_db=-40)
+            
+            # Step 7: Apply smooth fade in/out to prevent clicks at start/end
+            print(f"[tts]   Applying smooth fade in/out...")
+            final_wav = apply_fade(final_wav, fade_ms=100)  # Longer fade for smoother edges
+            
+            print(f"[tts] Audio post-processing complete")
 
         # --- Volume normalization (server-side) ---
         # Normalizes audio to consistent loudness levels
