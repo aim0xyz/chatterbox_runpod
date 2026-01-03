@@ -590,27 +590,44 @@ def generate_tts_handler(job):
         base_cfg_weight = cfg_weight
         base_exaggeration = exaggeration
         
-        if model_type == "multilingual" and voice_language != language:
-            if preserve_voice_accent or accent_control < 0.1:
-                # Preserve voice accent: use original parameters to keep voice's natural accent
-                # No adjustments needed - let the voice embedding control the accent
-                print(f"[tts] Preserving voice accent: using original parameters to keep {voice_language} accent")
+        # For multilingual model, always ensure consistent parameters for accent consistency
+        # Even when languages match, we want consistent generation across all chunks
+        if model_type == "multilingual":
+            if voice_language != language:
+                if preserve_voice_accent or accent_control < 0.1:
+                    # Preserve voice accent: use original parameters to keep voice's natural accent
+                    # No adjustments needed - let the voice embedding control the accent
+                    print(f"[tts] Preserving voice accent: using original parameters to keep {voice_language} accent")
+                    print(f"[tts] Parameters: temp={base_temperature:.2f}, cfg={base_cfg_weight:.2f}, exaggeration={base_exaggeration:.2f}")
+                elif accent_control > 0.0:
+                    # More aggressive adjustments for consistent target language accent across all chunks
+                    # Higher temperature = more variation = less voice accent influence
+                    base_temperature = min(temperature + (accent_control * 0.3), 1.0)
+                    
+                    # Lower cfg_weight = less voice embedding influence = more language model control
+                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.4), 0.15)
+                    
+                    # Slightly reduce exaggeration to make accent more consistent
+                    base_exaggeration = exaggeration * (1.0 - accent_control * 0.1)
+                    
+                    print(f"[tts] Accent control active: temp={base_temperature:.2f} (was {temperature:.2f}), "
+                          f"cfg={base_cfg_weight:.2f} (was {cfg_weight:.2f}), "
+                          f"exaggeration={base_exaggeration:.2f} (was {exaggeration:.2f})")
+                    print(f"[tts] These parameters will be applied consistently to ALL chunks")
+            else:
+                # Languages match - use consistent parameters for all chunks to ensure accent consistency
+                # Lower temperature slightly to reduce variation and ensure consistent accent
+                base_temperature = temperature * 0.95  # Slight reduction for more consistency
+                print(f"[tts] Languages match - using consistent parameters for accent consistency across all chunks")
                 print(f"[tts] Parameters: temp={base_temperature:.2f}, cfg={base_cfg_weight:.2f}, exaggeration={base_exaggeration:.2f}")
-            elif accent_control > 0.0:
-                # More aggressive adjustments for consistent target language accent across all chunks
-                # Higher temperature = more variation = less voice accent influence
-                base_temperature = min(temperature + (accent_control * 0.3), 1.0)
-                
-                # Lower cfg_weight = less voice embedding influence = more language model control
-                base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.4), 0.15)
-                
-                # Slightly reduce exaggeration to make accent more consistent
-                base_exaggeration = exaggeration * (1.0 - accent_control * 0.1)
-                
-                print(f"[tts] Accent control active: temp={base_temperature:.2f} (was {temperature:.2f}), "
-                      f"cfg={base_cfg_weight:.2f} (was {cfg_weight:.2f}), "
-                      f"exaggeration={base_exaggeration:.2f} (was {exaggeration:.2f})")
-                print(f"[tts] These parameters will be applied consistently to ALL chunks")
+        
+        # Use a consistent seed for ALL chunks to ensure accent consistency
+        # Different seeds per chunk can cause accent variation
+        consistent_seed = 12345  # Fixed seed for all chunks in this generation
+        torch.manual_seed(consistent_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(consistent_seed)
+        print(f"[tts] Using consistent seed ({consistent_seed}) for all chunks to ensure accent consistency")
         
         audio_chunks = []
         
@@ -621,12 +638,11 @@ def generate_tts_handler(job):
             chunk_start = time.time()
             print(f"[tts] Generating chunk {i+1}/{len(chunks)}: {chunk_text[:50]}...")
             try:
-                # Use consistent seed per chunk for reproducibility, but ensure accent control
-                # parameters are the same across all chunks
-                seed = (12345 + i * 9973) & 0xFFFFFFFF
-                torch.manual_seed(seed)
+                # Use consistent seed (set before loop) for all chunks to ensure accent consistency
+                # Re-set seed before each chunk to ensure deterministic generation
+                torch.manual_seed(consistent_seed)
                 if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
+                    torch.cuda.manual_seed_all(consistent_seed)
 
                 # Use inference_mode for faster inference (no gradient tracking)
                 with torch.inference_mode():
