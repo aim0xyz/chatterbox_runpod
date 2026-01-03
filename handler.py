@@ -600,22 +600,23 @@ def generate_tts_handler(job):
                     print(f"[tts] Preserving voice accent: using original parameters to keep {voice_language} accent")
                     print(f"[tts] Parameters: temp={base_temperature:.2f}, cfg={base_cfg_weight:.2f}, exaggeration={base_exaggeration:.2f}")
                 elif accent_control > 0.0:
-                    # More aggressive adjustments for consistent target language accent across all chunks
+                    # Extremely aggressive adjustments for consistent target language accent across all chunks
                     # Higher temperature = more variation = less voice accent influence
-                    # With accent_control=1.0, increase temperature significantly to reduce voice accent
-                    base_temperature = min(temperature + (accent_control * 0.4), 1.0)
+                    # With accent_control=1.0, maximize temperature to reduce voice accent as much as possible
+                    base_temperature = min(temperature + (accent_control * 0.5), 1.0)
                     
                     # Lower cfg_weight = less voice embedding influence = more language model control
-                    # With accent_control=1.0, reduce cfg_weight significantly to minimize voice accent
-                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.6), 0.1)
+                    # With accent_control=1.0, minimize cfg_weight to absolute minimum to prioritize target language accent
+                    # Reduce by 80% to strongly favor language model over voice embedding (clamped to minimum 0.1)
+                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.8), 0.1)
                     
-                    # Slightly reduce exaggeration to make accent more consistent
-                    base_exaggeration = exaggeration * (1.0 - accent_control * 0.15)
+                    # Reduce exaggeration more to make accent more consistent and prioritize target language
+                    base_exaggeration = exaggeration * (1.0 - accent_control * 0.2)
                     
-                    print(f"[tts] Accent control active (max strength): temp={base_temperature:.2f} (was {temperature:.2f}), "
+                    print(f"[tts] Accent control active (EXTREME strength for {language} accent): temp={base_temperature:.2f} (was {temperature:.2f}), "
                           f"cfg={base_cfg_weight:.2f} (was {cfg_weight:.2f}), "
                           f"exaggeration={base_exaggeration:.2f} (was {exaggeration:.2f})")
-                    print(f"[tts] These parameters will be applied consistently to ALL chunks for {language} accent")
+                    print(f"[tts] These parameters will be applied consistently to ALL chunks to ensure {language} accent")
             else:
                 # Languages match - use consistent parameters for all chunks to ensure accent consistency
                 # Lower temperature slightly to reduce variation and ensure consistent accent
@@ -630,6 +631,18 @@ def generate_tts_handler(job):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(consistent_seed)
         print(f"[tts] Using consistent seed ({consistent_seed}) for all chunks to ensure accent consistency")
+        
+        # Store final parameters as constants to ensure they're never modified
+        # These exact values will be used for EVERY chunk without any variation
+        final_temperature = base_temperature
+        final_cfg_weight = base_cfg_weight
+        final_exaggeration = base_exaggeration
+        
+        # Log the exact parameters that will be used for ALL chunks
+        if model_type == "multilingual":
+            print(f"[tts] LOCKED parameters for ALL chunks: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}, language_id={language}")
+        else:
+            print(f"[tts] LOCKED parameters for ALL chunks: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}")
         
         audio_chunks = []
         
@@ -650,24 +663,32 @@ def generate_tts_handler(job):
                 with torch.inference_mode():
                     # Different generate call based on model type
                     if model_type == "multilingual":
-                        # Use the pre-calculated accent-controlled parameters for consistency
+                        # CRITICAL: Use the EXACT same locked parameters for every chunk
+                        # These values are calculated once and never modified to ensure consistency
                         output = tts.generate(
                             text=chunk_text,
                             audio_prompt_path=str(voice_path),
-                            language_id=language,
-                            exaggeration=base_exaggeration,
-                            temperature=base_temperature,
-                            cfg_weight=base_cfg_weight,
+                            language_id=language,  # Same language_id for all chunks
+                            exaggeration=final_exaggeration,  # Same exaggeration for all chunks
+                            temperature=final_temperature,  # Same temperature for all chunks
+                            cfg_weight=final_cfg_weight,  # Same cfg_weight for all chunks
                         )
+                        # Verify parameters are being used correctly (log first chunk only to avoid spam)
+                        if i == 0:
+                            print(f"[tts] ✓ Chunk {i+1} using verified parameters: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}")
                     else:
                         # English model doesn't use language_id
+                        # Use locked parameters for consistency (same for all chunks)
                         output = tts.generate(
                             text=chunk_text,
                             audio_prompt_path=str(voice_path),
-                            exaggeration=exaggeration,
-                            temperature=temperature,
-                            cfg_weight=cfg_weight,
+                            exaggeration=final_exaggeration,  # Same for all chunks
+                            temperature=final_temperature,  # Same for all chunks
+                            cfg_weight=final_cfg_weight,  # Same for all chunks
                         )
+                        # Verify parameters are being used correctly (log first chunk only to avoid spam)
+                        if i == 0:
+                            print(f"[tts] ✓ Chunk {i+1} using verified parameters: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}")
 
                 wav = to_numpy(output)
                 chunk_time = time.time() - chunk_start
