@@ -495,18 +495,23 @@ def generate_tts_handler(job):
         language = inp.get("language", "en")
         
         # Voice language parameter - language of the voice sample (for accent control)
-        # First try to get from input parameter, then try to auto-detect from stored metadata,
+        # CRITICAL: Preset voices are ALWAYS English, so set voice_language = "en" for preset voices
+        # For user voices, try to get from input parameter, then auto-detect from stored metadata,
         # finally default to target language
         voice_language = inp.get("voice_language")
         
-        # Auto-detect from stored metadata if not provided
-        if voice_language is None and user_id and embedding_filename:
+        # If using a preset voice, preset voices are ALWAYS English
+        if preset_voice:
+            voice_language = "en"
+            print(f"[tts] Preset voice detected - setting voice_language to 'en' (preset voices are English-only)")
+        elif voice_language is None and user_id and embedding_filename:
+            # Auto-detect from stored metadata if not provided (only for user voices)
             stored_language = get_voice_language(user_id, embedding_filename)
             if stored_language:
                 voice_language = stored_language
                 print(f"[tts] Auto-detected voice language from metadata: {voice_language}")
         
-        # Default to target language if still not found
+        # Default to target language if still not found (only for user voices without metadata)
         if voice_language is None:
             voice_language = language
             print(f"[tts] Voice language not specified, defaulting to target language: {language}")
@@ -520,26 +525,34 @@ def generate_tts_handler(job):
         # Preserve voice accent parameter - if True, keeps the accent from the voice sample
         # (e.g., grandma's German accent even when generating English text)
         # If False, uses target language accent (default behavior for cross-language)
-        # Auto-detect: preserve accent when languages match, use target accent when they differ
+        # IMPORTANT: For preset voices (always English), we should NEVER preserve accent when target language differs
+        # If voice_language was auto-detected (defaulted to target), we should NOT preserve accent
+        # because the voice might actually be in a different language than the target
+        voice_language_was_auto_detected = voice_language == language and inp.get("voice_language") is None and not preset_voice
+        
         if "preserve_voice_accent" in inp:
             # Explicitly set by user
             preserve_voice_accent = bool(inp.get("preserve_voice_accent", False))
         else:
-            # Auto-detect: preserve accent when languages match
-            preserve_voice_accent = languages_match
+            # Auto-detect: preserve accent when languages match AND voice_language was explicitly provided
+            # For preset voices with different target language, always use target accent (don't preserve English accent)
+            # If voice_language was auto-detected (defaulted), don't preserve accent to allow accent control
+            preserve_voice_accent = languages_match and not voice_language_was_auto_detected and not (preset_voice and not languages_match)
         
         # Accent control parameter - controls how much to prioritize target language accent
         # vs voice sample accent (0.0 = use voice accent, 1.0 = prioritize target language accent)
-        # If preserve_voice_accent is True, accent_control is set to 0.0
-        # Default: 1.0 (maximum accent control when different from voice) for consistent target language accent
-        # But if preserve_voice_accent is True, use 0.0 to keep the voice's natural accent
+        # CRITICAL: When voice_language was auto-detected or languages differ, ALWAYS use maximum accent control
+        # to ensure target language accent is used (e.g., German accent for German text, even with English voice)
         if preserve_voice_accent:
             accent_control = 0.0
-            print(f"[tts] ✅ Auto-detected: Preserving voice accent (languages match: {voice_language} == {language})")
+            print(f"[tts] ✅ Preserving voice accent (explicitly requested or languages match with explicit voice_language)")
         else:
-            accent_control = float(inp.get("accent_control", 1.0 if not languages_match else 0.0))
-            if not languages_match:
-                print(f"[tts] ⚠️  Auto-detected: Using target language accent (languages differ: {voice_language} != {language})")
+            # Force maximum accent control when languages differ OR when voice_language was auto-detected
+            # This ensures target language accent is always used
+            accent_control = float(inp.get("accent_control", 1.0))
+            if not languages_match or voice_language_was_auto_detected:
+                print(f"[tts] ⚠️  Using target language accent ({language}) - accent_control={accent_control:.2f} (MAXIMUM)")
+                print(f"[tts]   Reason: {'languages differ' if not languages_match else 'voice_language was auto-detected'}")
         
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
@@ -592,8 +605,13 @@ def generate_tts_handler(job):
         
         # For multilingual model, always ensure consistent parameters for accent consistency
         # Even when languages match, we want consistent generation across all chunks
+        # CRITICAL: Apply accent control if languages differ OR if voice_language was auto-detected
+        # (auto-detected means we don't know the actual voice language, so we should use target accent)
         if model_type == "multilingual":
-            if voice_language != language:
+            # Apply accent control if: languages differ OR voice_language was auto-detected
+            should_apply_accent_control = (voice_language != language) or voice_language_was_auto_detected
+            
+            if should_apply_accent_control:
                 if preserve_voice_accent or accent_control < 0.1:
                     # Preserve voice accent: use original parameters to keep voice's natural accent
                     # No adjustments needed - let the voice embedding control the accent
