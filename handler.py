@@ -680,18 +680,21 @@ def generate_tts_handler(job):
             final_wav = detect_and_remove_clicks(final_wav, threshold=0.3)
             
             # Step 3: Apply smoothing to reduce rapid amplitude changes
-            final_wav = apply_smoothing_filter(final_wav, window_size=5)
+            # REMOVED: Smoothing filter was causing muffled "pillow" sound - high frequencies were being dulled
+            # final_wav = apply_smoothing_filter(final_wav, window_size=5)
             
             # Step 4: Apply high-pass filter to remove low-frequency artifacts (howling, rumble)
-            print(f"[tts]   High-pass filter (100Hz) to remove low-frequency artifacts...")
-            final_wav = apply_high_pass_filter(final_wav, cutoff_hz=100)
+            # REMOVED: High-pass filter already applied during stitching (line 424) - duplicate application was over-filtering
+            # print(f"[tts]   High-pass filter (100Hz) to remove low-frequency artifacts...")
+            # final_wav = apply_high_pass_filter(final_wav, cutoff_hz=100)
             
             # Step 5: Low-pass filter removed - was making audio sound too dimmed/muffled
             # If high-frequency artifacts are still an issue, we can add it back with a higher cutoff (e.g., 18kHz)
             
             # Step 6: Apply spectral gating to remove background noise and hiss
+            # Reduced threshold from -40dB to -50dB to make gating less aggressive and preserve clarity
             print(f"[tts]   Spectral gating to remove background noise...")
-            final_wav = apply_spectral_gating(final_wav, threshold_db=-40)
+            final_wav = apply_spectral_gating(final_wav, threshold_db=-50)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
