@@ -480,6 +480,316 @@ def stitch_chunks(audio_list, pause_ms=100):
     print(f"[stitch] Final stitched audio: {len(result)} samples, RMS: {final_rms:.4f}, Peak: {final_peak:.4f}")
     return result
 
+# ============================================
+# VOICE VERIFICATION FUNCTIONS
+# ============================================
+
+def check_voice_liveness(audio_path):
+    """
+    Acoustic anti-spoofing check using librosa.
+    Detects if audio is replayed/synthetic vs. live recording.
+    """
+    try:
+        import librosa
+        
+        print(f"[anti-spoof] Analyzing audio: {audio_path}")
+        
+        y, sr = librosa.load(str(audio_path), sr=16000)
+        
+        if len(y) < 1000:
+            print(f"[anti-spoof] Audio too short: {len(y)} samples")
+            return {
+                'passed': False,
+                'score': 0.0,
+                'details': {'error': 'Audio too short (minimum 1000 samples required)'}
+            }
+        
+        # Feature extraction
+        spectral_flatness = float(np.mean(librosa.feature.spectral_flatness(y=y)))
+        zcr = float(np.mean(librosa.feature.zero_crossing_rate(y)))
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        mfcc_var = float(np.var(mfcc))
+        rolloff = float(np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr)))
+        rms = librosa.feature.rms(y=y)
+        rms_std = float(np.std(rms))
+        
+        print(f"[anti-spoof] Features: spectral_flat={spectral_flatness:.4f}, "
+              f"zcr={zcr:.4f}, mfcc_var={mfcc_var:.2f}, "
+              f"rolloff={rolloff:.1f}, rms_std={rms_std:.4f}")
+        
+        # Scoring
+        score = 0.0
+        
+        if 0.15 < spectral_flatness < 0.4:
+            score += 0.25
+        elif spectral_flatness < 0.15:
+            score += 0.15
+        
+        if 0.04 < zcr < 0.18:
+            score += 0.20
+        
+        if mfcc_var > 120:
+            score += 0.25
+        elif mfcc_var > 60:
+            score += 0.15
+        
+        if 1200 < rolloff < 5000:
+            score += 0.15
+        
+        if rms_std > 0.03:
+            score += 0.15
+        elif rms_std > 0.015:
+            score += 0.10
+        
+        passed = score >= 0.65
+        
+        print(f"[anti-spoof] Score: {score:.2f}, Passed: {passed}")
+        
+        return {
+            'passed': passed,
+            'score': float(score),
+            'details': {
+                'spectral_flatness': spectral_flatness,
+                'zero_crossing_rate': zcr,
+                'mfcc_variance': mfcc_var,
+                'spectral_rolloff': rolloff,
+                'rms_std': rms_std,
+            }
+        }
+        
+    except Exception as e:
+        print(f"[anti-spoof] Error: {e}")
+        traceback.print_exc()
+        return {
+            'passed': False,
+            'score': 0.0,
+            'details': {'error': str(e)}
+        }
+
+
+def verify_transcript(audio_path, original_text, language='en'):
+    """
+    Verify that the recorded audio matches the expected text using Speech-to-Text.
+    """
+    try:
+        from faster_whisper import WhisperModel
+        
+        print(f"[stt] Transcribing audio in {language}: {audio_path}")
+        
+        # Load Whisper model
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if device == "cuda" else "int8"
+        
+        model = WhisperModel(
+            "base",
+            device=device,
+            compute_type=compute_type,
+            download_root="/runpod-volume/.cache/whisper"
+        )
+        
+        # Transcribe
+        segments, info = model.transcribe(
+            str(audio_path),
+            language=language,
+            beam_size=5,
+            best_of=5,
+            temperature=0.0,
+        )
+        
+        transcript = " ".join([segment.text for segment in segments]).strip()
+        
+        print(f"[stt] Transcript: {transcript[:100]}...")
+        print(f"[stt] Original:   {original_text[:100]}...")
+        
+        match_score = calculate_text_similarity(
+            transcript.lower(),
+            original_text.lower()
+        )
+        
+        passed = match_score >= 0.85
+        
+        print(f"[stt] Match score: {match_score:.2f}, Passed: {passed}")
+        
+        return {
+            'match_score': float(match_score),
+            'transcript': transcript,
+            'original': original_text,
+            'passed': passed,
+        }
+        
+    except Exception as e:
+        print(f"[stt] Error: {e}")
+        traceback.print_exc()
+        return {
+            'match_score': 0.0,
+            'transcript': '',
+            'original': original_text,
+            'passed': False,
+            'error': str(e)
+        }
+
+
+def calculate_text_similarity(str1, str2):
+    """Calculate text similarity using normalized Levenshtein distance."""
+    str1 = re.sub(r'[^\w\s]', '', str1).strip()
+    str2 = re.sub(r'[^\w\s]', '', str2).strip()
+    str1 = re.sub(r'\s+', ' ', str1)
+    str2 = re.sub(r'\s+', ' ', str2)
+    
+    if not str1 or not str2:
+        return 0.0
+    
+    longer = str1 if len(str1) > len(str2) else str2
+    shorter = str2 if len(str1) > len(str2) else str1
+    
+    if len(longer) == 0:
+        return 1.0
+    
+    edit_distance = levenshtein_distance(longer, shorter)
+    similarity = (len(longer) - edit_distance) / len(longer)
+    
+    return max(0.0, min(1.0, similarity))
+
+
+def levenshtein_distance(s1, s2):
+    """Calculate Levenshtein distance."""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+
+# ============================================
+# HANDLER: Verify Recording
+# ============================================
+
+def verify_recording_handler(job):
+    """Verify a voice recording before cloning."""
+    try:
+        inp = job.get("input", {})
+        audio_b64 = inp.get("audio_data")
+        original_story = inp.get("original_story")
+        language = inp.get("language", "en")
+        user_id = inp.get("user_id", "anonymous")
+        
+        if not audio_b64:
+            return {"error": "audio_data is required"}
+        if not original_story:
+            return {"error": "original_story is required"}
+        
+        print(f"[verify] User: {user_id}, Language: {language}")
+        print(f"[verify] Story length: {len(original_story)} chars")
+        
+        # Save audio temporarily
+        temp_dir = Path("/tmp/verify")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = temp_dir / f"verify_{uuid.uuid4().hex}.wav"
+        
+        audio_bytes = base64.b64decode(audio_b64)
+        with open(temp_path, "wb") as f:
+            f.write(audio_bytes)
+        
+        # Convert to proper format
+        converted_path = temp_dir / f"verify_{uuid.uuid4().hex}_converted.wav"
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", str(temp_path),
+                "-ar", "24000", "-ac", "1", str(converted_path)
+            ], check=True, capture_output=True, timeout=30)
+        except subprocess.CalledProcessError as e:
+            temp_path.unlink(missing_ok=True)
+            return {"error": f"Audio conversion failed: {e.stderr.decode() if e.stderr else str(e)}"}
+        
+        # Anti-spoofing check
+        print(f"[verify] Running anti-spoofing check...")
+        liveness_result = check_voice_liveness(converted_path)
+        
+        # Speech-to-text verification
+        print(f"[verify] Running speech-to-text verification...")
+        stt_result = verify_transcript(converted_path, original_story, language)
+        
+        # Cleanup
+        temp_path.unlink(missing_ok=True)
+        converted_path.unlink(missing_ok=True)
+        
+        overall_passed = liveness_result['passed'] and stt_result['passed']
+        
+        print(f"[verify] Results: liveness={liveness_result['passed']}, "
+              f"stt={stt_result['passed']}, overall={overall_passed}")
+        
+        return {
+            "status": "success",
+            "verification": {
+                "passed": overall_passed,
+                "liveness": {
+                    "passed": liveness_result['passed'],
+                    "score": liveness_result['score'],
+                    "details": liveness_result['details']
+                },
+                "transcript": {
+                    "passed": stt_result['passed'],
+                    "match_score": stt_result['match_score'],
+                    "transcript": stt_result.get('transcript', ''),
+                }
+            }
+        }
+        
+    except Exception as e:
+        print(f"[error] Verification failed: {e}")
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
+# ============================================
+# HANDLER: Clone Voice with Verification
+# ============================================
+
+def clone_voice_verified_handler(job):
+    """Clone voice with built-in verification."""
+    try:
+        inp = job.get("input", {})
+        
+        print(f"[clone_verified] Step 1: Verifying recording...")
+        verification_result = verify_recording_handler(job)
+        
+        if "error" in verification_result:
+            return verification_result
+        
+        if not verification_result.get("verification", {}).get("passed", False):
+            print(f"[clone_verified] Verification failed, rejecting clone request")
+            return {
+                "error": "Verification failed",
+                "verification": verification_result.get("verification"),
+                "reason": "Audio did not pass anti-spoofing or transcript verification"
+            }
+        
+        print(f"[clone_verified] ✅ Verification passed, proceeding with clone...")
+        
+        return clone_voice_handler(job)
+        
+    except Exception as e:
+        print(f"[error] Clone with verification failed: {e}")
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
+# ============================================
+# EXISTING HANDLERS
+# ============================================
+
 def generate_tts_handler(job):
     try:
         inp = job.get("input", {})
@@ -1066,6 +1376,10 @@ def handler(job):
 
         if action == "clone_voice":
             return clone_voice_handler(job)
+        elif action == "clone_voice_verified":
+            return clone_voice_verified_handler(job)
+        elif action == "verify_recording":
+            return verify_recording_handler(job)
         elif action == "generate_tts":
             return generate_tts_handler(job)
         elif action == "list_presets":
