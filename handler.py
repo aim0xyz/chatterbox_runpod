@@ -859,28 +859,22 @@ def generate_tts_handler(job):
         # This can be overridden by explicitly setting preserve_voice_accent
         languages_match = voice_language == language
         
-        # Preserve voice accent parameter - if True, keeps the accent from the voice sample
-        # (e.g., grandma's German accent even when generating English text)
-        # If False, uses target language accent (default behavior for cross-language)
-        # IMPORTANT: For preset voices (always English), we should NEVER preserve accent when target language differs
-        # If voice_language was auto-detected (defaulted to target), we should NOT preserve accent
-        # because the voice might actually be in a different language than the target
-        # Update: If it came from metadata, it is NOT "auto-detected" (guessed) - it is known!
-        voice_language_was_auto_detected = (
-            voice_language == language and 
-            inp.get("voice_language") is None and 
-            not voice_language_from_metadata and 
-            not preset_voice
-        )
-        
+        # Determine if we should preserve the voice accent
+        # Default: Yes, preserve it unless explicitly told otherwise or for preset voices across languages
+        # This fixes the "unwanted accent" issue where it was too aggressively switching to target language accent
         if "preserve_voice_accent" in inp:
             # Explicitly set by user
             preserve_voice_accent = bool(inp.get("preserve_voice_accent", False))
+        elif preset_voice:
+            # For preset voices (always English initially), use target language accent if languages differ
+            preserve_voice_accent = languages_match
         else:
-            # Auto-detect: preserve accent when languages match AND voice_language was explicitly provided
-            # For preset voices with different target language, always use target accent (don't preserve English accent)
-            # If voice_language was auto-detected (defaulted), don't preserve accent to allow accent control
-            preserve_voice_accent = languages_match and not voice_language_was_auto_detected and not (preset_voice and not languages_match)
+            # Users voices: ALWAYS preserve voice accent by default (even across languages)
+            # This prevents your English voice from sounding French when reading French text
+            # Only switch if voice_language was completely unknown (no metadata)
+            preserve_voice_accent = True
+            if voice_language_was_auto_detected:
+                preserve_voice_accent = False
         
         # Accent control parameter - controls how much to prioritize target language accent
         # vs voice sample accent (0.0 = use voice accent, 1.0 = prioritize target language accent)
@@ -989,7 +983,7 @@ def generate_tts_handler(job):
         
         # Use a consistent seed for ALL chunks to ensure accent consistency
         # Different seeds per chunk can cause accent variation
-        consistent_seed = 12345  # Fixed seed for all chunks in this generation
+        consistent_seed = 42  # Fixed seed for maximum consistency
         torch.manual_seed(consistent_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(consistent_seed)
@@ -1000,6 +994,10 @@ def generate_tts_handler(job):
         final_temperature = base_temperature
         final_cfg_weight = base_cfg_weight
         final_exaggeration = base_exaggeration
+        
+        # IMPORTANT: Disable potential randomness in model generation
+        # Reset torch random state before the loop
+        state = torch.get_rng_state()
         
         # Log the exact parameters that will be used for ALL chunks
         if model_type == "multilingual":
@@ -1018,9 +1016,13 @@ def generate_tts_handler(job):
             try:
                 # Use consistent seed (set before loop) for all chunks to ensure accent consistency
                 # Re-set seed before each chunk to ensure deterministic generation
+                # CRITICAL: Always reset the seed to the EXACT SAME value for EVERY chunk
                 torch.manual_seed(consistent_seed)
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed_all(consistent_seed)
+                
+                # Restore RNG state to ensure other random operations (if any) are consistent
+                torch.set_rng_state(state)
 
                 # Use inference_mode for faster inference (no gradient tracking)
                 with torch.inference_mode():
