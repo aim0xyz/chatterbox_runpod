@@ -410,48 +410,58 @@ def crossfade(audio1, audio2, crossfade_ms=50):
         audio2[crossfade_samples:]
     ]).astype(np.float32)
 
-def stitch_chunks(audio_list, pause_ms=100):
-    """Stitch audio chunks with seamless crossfading and minimal pauses."""
+def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
+    """Stitch audio chunks with storytelling pauses and seamless crossfading."""
     if not audio_list:
         return np.array([], dtype=np.float32)
-    
-    print(f"[stitch] Stitching {len(audio_list)} chunks with {pause_ms}ms pause")
     
     # Normalize each chunk individually for consistent volume
     normalized_chunks = []
     for i, chunk in enumerate(audio_list):
-        # Apply high-pass filter first to remove low-frequency artifacts (howling, rumble)
         filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
-        rms_before = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
         normalized = normalize_chunk(filtered)
-        rms_after = float(np.sqrt(np.mean(normalized ** 2))) if len(normalized) > 0 else 0.0
-        # Longer fade for smoother edges
-        faded = apply_fade(normalized, fade_ms=80)
+        # Apply gentle fades to each chunk
+        faded = apply_fade(normalized, fade_ms=50)
         normalized_chunks.append(faded)
-        if i < 3:  # Log first few chunks for debugging
-            print(f"[stitch] Chunk {i+1}: {len(chunk)} samples, RMS {rms_before:.4f} -> {rms_after:.4f}")
     
     if len(normalized_chunks) == 1:
         return normalized_chunks[0]
     
-    # Stitch with seamless crossfading and minimal pauses
+    # Stitch with dynamic storytelling pauses
     result = normalized_chunks[0]
-    pause_samples = int(SAMPLE_RATE * pause_ms / 1000)
     
     import time
     stitch_start = time.time()
     
     for i, chunk in enumerate(normalized_chunks[1:], 1):
-        # Short pause with crossfade for natural speech rhythm
+        prev_text = chunk_texts[i-1].strip()
+        
+        # Determine specific pause based on punctuation
+        current_pause = pause_ms
+        if prev_text.endswith(('.', '!', '?')):
+            current_pause = 650  # Long pause for sentences
+        elif prev_text.endswith((',', ';', ':')):
+            current_pause = 300  # Medium pause for commas
+        elif '\n' in prev_text:
+            current_pause = 900  # Very long for paragraphs
+        else:
+            current_pause = 150  # Natural breath
+            
+        pause_samples = int(SAMPLE_RATE * current_pause / 1000)
+        
         if pause_samples > 0:
             pause = np.zeros(pause_samples, dtype=np.float32)
             result = np.concatenate([result, pause])
         
         # Crossfade into next chunk for seamless transition
         if len(result) > 0 and len(chunk) > 0:
-            result = crossfade(result, chunk, crossfade_ms=60)
+            result = crossfade(result, chunk, crossfade_ms=40)
         else:
             result = np.concatenate([result, chunk])
+    
+    stitch_time = time.time() - stitch_start
+    print(f"[stitch] Storyteller stitching completed in {stitch_time:.2f}s")
+    return result.astype(np.float32)
     
     stitch_time = time.time() - stitch_start
     print(f"[stitch] Stitching completed in {stitch_time:.2f}s")
@@ -881,10 +891,11 @@ def generate_tts_handler(job):
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
 
-        # Slightly lower default temperature to reduce artifacts (howling, rubbing sounds)
-        # Lower temperature = more deterministic = fewer artifacts
-        exaggeration = float(inp.get("exaggeration", 0.5))
-        temperature = float(inp.get("temperature", 0.65))  # Reduced from 0.7 to 0.65
+        # Tweak parameters for a more "Storyteller" feel
+        # Higher exaggeration = more expressive prosody
+        # Slightly higher temperature = more varied intonation
+        exaggeration = float(inp.get("exaggeration", 0.85))
+        temperature = float(inp.get("temperature", 0.72))
         cfg_weight = float(inp.get("cfg_weight", 0.5))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
@@ -1048,7 +1059,7 @@ def generate_tts_handler(job):
         if not audio_chunks:
             return {"error": "No audio generated"}
 
-        final_wav = stitch_chunks(audio_chunks, pause_ms=pause_ms)
+        final_wav = stitch_chunks(audio_chunks, chunks, pause_ms=pause_ms)
 
         # --- Apply comprehensive audio post-processing to reduce artifacts ---
         if len(final_wav) > 0:
