@@ -243,7 +243,7 @@ def normalize_chunk(wav, target_rms=0.12):
             wav = wav * (0.95 / max_amp)
     return wav
 
-def apply_high_pass_filter(wav, cutoff_hz=100):
+def apply_high_pass_filter(wav, cutoff_hz=60):
     """Apply a high-pass filter to remove low-frequency artifacts (howling, rumble)."""
     if len(wav) < 100:
         return wav
@@ -418,7 +418,7 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     # Normalize each chunk individually for consistent volume
     normalized_chunks = []
     for i, chunk in enumerate(audio_list):
-        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
+        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=60)
         normalized = normalize_chunk(filtered)
         # Apply gentle fades to each chunk
         faded = apply_fade(normalized, fade_ms=50)
@@ -834,6 +834,8 @@ def generate_tts_handler(job):
         # finally default to target language
         voice_language = inp.get("voice_language")
         
+        voice_language_from_metadata = False
+        
         # If using a preset voice, preset voices are ALWAYS English
         if preset_voice:
             voice_language = "en"
@@ -843,6 +845,7 @@ def generate_tts_handler(job):
             stored_language = get_voice_language(user_id, embedding_filename)
             if stored_language:
                 voice_language = stored_language
+                voice_language_from_metadata = True
                 print(f"[tts] Auto-detected voice language from metadata: {voice_language}")
         
         # Default to target language if still not found (only for user voices without metadata)
@@ -862,7 +865,13 @@ def generate_tts_handler(job):
         # IMPORTANT: For preset voices (always English), we should NEVER preserve accent when target language differs
         # If voice_language was auto-detected (defaulted to target), we should NOT preserve accent
         # because the voice might actually be in a different language than the target
-        voice_language_was_auto_detected = voice_language == language and inp.get("voice_language") is None and not preset_voice
+        # Update: If it came from metadata, it is NOT "auto-detected" (guessed) - it is known!
+        voice_language_was_auto_detected = (
+            voice_language == language and 
+            inp.get("voice_language") is None and 
+            not voice_language_from_metadata and 
+            not preset_voice
+        )
         
         if "preserve_voice_accent" in inp:
             # Explicitly set by user
@@ -891,12 +900,13 @@ def generate_tts_handler(job):
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
 
-        # Tweak parameters for a more "Storyteller" feel
-        # Higher exaggeration = more expressive prosody
-        # Slightly higher temperature = more varied intonation
-        exaggeration = float(inp.get("exaggeration", 0.85))
-        temperature = float(inp.get("temperature", 0.72))
-        cfg_weight = float(inp.get("cfg_weight", 0.5))
+        # Tweak parameters for better voice cloning fidelity (faithful to user's style)
+        # Lower exaggeration = less forced drama, more natural to the original voice (was 0.85)
+        # Slightly lower temperature = more stability/less random variation (was 0.72)
+        # Higher cfg_weight = more influence from the voice sample style (was 0.5)
+        exaggeration = float(inp.get("exaggeration", 0.6))
+        temperature = float(inp.get("temperature", 0.65))
+        cfg_weight = float(inp.get("cfg_weight", 0.8))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
@@ -1086,7 +1096,7 @@ def generate_tts_handler(job):
             # Step 6: Apply spectral gating to remove background noise and hiss
             # Reduced threshold from -40dB to -50dB to make gating less aggressive and preserve clarity
             print(f"[tts]   Spectral gating to remove background noise...")
-            final_wav = apply_spectral_gating(final_wav, threshold_db=-50)
+            final_wav = apply_spectral_gating(final_wav, threshold_db=-60)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
