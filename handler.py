@@ -576,10 +576,12 @@ def verify_transcript(audio_path, original_text, language='en'):
         
         print(f"[stt] Transcribing audio in {language}: {audio_path}")
         
-        # Load Whisper model
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
+        # Load Whisper model - Force CPU to avoid cuDNN library conflicts in slim container
+        # Note: Short verification clips are fast enough on CPU
+        device = "cpu"
+        compute_type = "int8"
         
+        print(f"[stt] Initializing Whisper on {device}...")
         model = WhisperModel(
             "base",
             device=device,
