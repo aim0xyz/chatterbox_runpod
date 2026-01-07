@@ -77,8 +77,7 @@ RUN pip install --no-cache-dir \
 
 # Speech-to-Text (faster-whisper)
 RUN pip install --no-cache-dir \
-    faster-whisper==0.10.0 \
-    ctranslate2==3.24.0
+    faster-whisper==0.10.0
 
 # Audio processing utilities
 RUN pip install --no-cache-dir \
