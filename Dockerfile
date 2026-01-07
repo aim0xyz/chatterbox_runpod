@@ -75,9 +75,9 @@ RUN pip install --no-cache-dir \
     scikit-learn==1.3.2 \
     joblib==1.3.2
 
-# Speech-to-Text (faster-whisper)
+# Speech-to-Text (faster-whisper) - use compatible versions
 RUN pip install --no-cache-dir \
-    faster-whisper==0.10.0
+    faster-whisper==1.0.3
 
 # Audio processing utilities
 RUN pip install --no-cache-dir \
