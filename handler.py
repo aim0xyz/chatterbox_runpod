@@ -608,15 +608,20 @@ def verify_transcript(audio_path, original_text, language='en'):
             original_text.lower()
         )
         
-        passed = match_score >= 0.85
+        # info.language is the detected language code (e.g., 'en', 'de')
+        detected_language = info.language
+        language_probability = info.language_probability
         
         print(f"[stt] Match score: {match_score:.2f}, Passed: {passed}")
+        print(f"[stt] Detected language: {detected_language} ({language_probability:.2f})")
         
         return {
             'match_score': float(match_score),
             'transcript': transcript,
             'original': original_text,
             'passed': passed,
+            'detected_language': detected_language,
+            'language_probability': float(language_probability)
         }
         
     except Exception as e:
@@ -745,6 +750,7 @@ def verify_recording_handler(job):
                     "passed": stt_result['passed'],
                     "match_score": stt_result['match_score'],
                     "transcript": stt_result.get('transcript', ''),
+                    "detected_language": stt_result.get('detected_language'),
                 }
             }
         }
@@ -779,6 +785,12 @@ def clone_voice_verified_handler(job):
             }
         
         print(f"[clone_verified] ✅ Verification passed, proceeding with clone...")
+        
+        # Use Whisper's detected language for auto accent selection
+        detected_lang = verification_result.get("verification", {}).get("transcript", {}).get("detected_language")
+        if detected_lang:
+            print(f"[clone_verified] Overriding voice_language with detected language: {detected_lang}")
+            inp["voice_language"] = detected_lang
         
         return clone_voice_handler(job)
         
