@@ -856,6 +856,13 @@ def generate_tts_handler(job):
             voice_language = language
             print(f"[tts] Voice language not specified, defaulting to target language: {language}")
         
+        # Determine if voice language was defaulted (not explicitly known)
+        voice_language_was_auto_detected = (
+            inp.get("voice_language") is None and 
+            not preset_voice and 
+            not voice_language_from_metadata
+        )
+        
         # Automatic accent control based on language matching:
         # - If voice_language == language: preserve voice accent (same language, keep natural accent)
         # - If voice_language != language: use target language accent (different language, prioritize target)
