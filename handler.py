@@ -622,6 +622,9 @@ def verify_transcript(audio_path, original_text, language='en'):
         detected_language = info.language
         language_probability = info.language_probability
         
+        # Define pass threshold
+        passed = match_score >= 0.6
+        
         print(f"[stt] Match score: {match_score:.2f}, Passed: {passed}")
         print(f"[stt] Detected language: {detected_language} ({language_probability:.2f})")
         
