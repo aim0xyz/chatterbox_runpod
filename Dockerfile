@@ -91,6 +91,9 @@ RUN pip install --no-cache-dir "runpod>=0.9.0" soundfile
 # Pre-download Whisper model to avoid cold starts
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', download_root='/runpod-volume/.cache/whisper')" || echo "Whisper model will download on first use"
 
+# Pre-download Chinese segmentation model to avoid cold start downloads
+RUN python -c "from spacy_pkuseg import pkuseg; pkuseg()" || echo "pkuseg model will download on first use"
+
 # Copy handler and startup script
 COPY handler.py /handler.py
 COPY start.sh /start.sh
