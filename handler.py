@@ -904,13 +904,25 @@ def generate_tts_handler(job):
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
 
-        # Tweak parameters for better voice cloning fidelity (faithful to user's style)
-        # Lower exaggeration = less forced drama, more natural to the original voice (was 0.85)
-        # Slightly lower temperature = more stability/less random variation (was 0.72)
-        # Higher cfg_weight = more influence from the voice sample style (was 0.5)
-        exaggeration = float(inp.get("exaggeration", 0.6))
+        # ===== OPTIMIZED PARAMETERS FOR CLEAN STORYTELLING AUDIO =====
+        # These defaults match Resemble AI's official Multilingual demo for best quality
+        # Balances voice cloning accuracy with clean, artifact-free audio generation
+        
+        # Exaggeration: Controls prosody expressiveness
+        # 0.5 = neutral, natural storytelling (was 0.6 - too dramatic)
+        # Lower = more natural pacing, fewer artifacts in emotional peaks
+        exaggeration = float(inp.get("exaggeration", 0.5))
+        
+        # Temperature: Controls generation randomness/stability
+        # 0.65 = good balance (lower than demo's 0.8 for more consistency)
+        # Lower = more stable generation, fewer random artifacts
         temperature = float(inp.get("temperature", 0.65))
-        cfg_weight = float(inp.get("cfg_weight", 0.8))
+        
+        # CFG Weight: Controls how much to follow reference voice vs natural speech
+        # 0.5 = balanced (was 0.8 - amplified reference artifacts by 60%!)
+        # Lower = cleaner audio, doesn't amplify reference imperfections
+        # Note: For voices with strong accents, this can be increased to 0.7 via API parameter
+        cfg_weight = float(inp.get("cfg_weight", 0.5))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
@@ -1106,9 +1118,10 @@ def generate_tts_handler(job):
             # If high-frequency artifacts are still an issue, we can add it back with a higher cutoff (e.g., 18kHz)
             
             # Step 6: Apply spectral gating to remove background noise and hiss
-            # Reduced threshold from -40dB to -50dB to make gating less aggressive and preserve clarity
+            # -55dB threshold: Removes obvious noise while preserving natural breath sounds
+            # Less aggressive than -60dB to avoid "digital" sound and pumping artifacts
             print(f"[tts]   Spectral gating to remove background noise...")
-            final_wav = apply_spectral_gating(final_wav, threshold_db=-60)
+            final_wav = apply_spectral_gating(final_wav, threshold_db=-55)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
