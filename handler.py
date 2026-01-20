@@ -519,17 +519,36 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     # Normalize each chunk individually for consistent volume
     normalized_chunks = []
     for i, chunk in enumerate(audio_list):
-        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=60)
+        # Increased high-pass filter from 60Hz to 100Hz to eliminate "thumps" and "falling" noises
+        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
         normalized = normalize_chunk(filtered)
         
-        # Trim potential breath sounds from chunk edges before stitching
-        # Breaths typically occur at the very end/start of chunks
-        edge_trim_ms = 20  # Trim 20ms from edges where breaths often hide
-        trim_samples = int(SAMPLE_RATE * edge_trim_ms / 1000)
+        # Energy-based Tail Trimmer: Remove hallucinations/artifacts at chunk ends
+        # We look for the last point where the audio is actually "speech" (>-45dB)
+        # Any noise/thumps after that are likely model artifacts
+        tail_threshold = 10 ** (-45 / 20.0)
+        win_len = int(SAMPLE_RATE * 0.03) # 30ms window
         
-        if len(normalized) > trim_samples * 3:  # Only trim if chunk is long enough
-            # Trim end more aggressively (where exhale breaths occur)
-            normalized = normalized[:-trim_samples] if len(normalized) > trim_samples else normalized
+        last_speech_idx = len(normalized)
+        # Scan backwards from the end to find where the speech actually stops
+        for j in range(len(normalized) - win_len, max(0, len(normalized) - int(SAMPLE_RATE * 0.2)), -win_len):
+            win_rms = np.sqrt(np.mean(normalized[j:j+win_len]**2))
+            if win_rms > tail_threshold:
+                # Add a tiny padding to not cut off words harshly
+                last_speech_idx = j + win_len + int(SAMPLE_RATE * 0.01)
+                break
+            last_speech_idx = j
+            
+        # Also clean up the start of the chunk (inhale breaths)
+        first_speech_idx = 0
+        for j in range(0, min(len(normalized), int(SAMPLE_RATE * 0.1)), win_len):
+            win_rms = np.sqrt(np.mean(normalized[j:j+win_len]**2))
+            if win_rms > tail_threshold:
+                first_speech_idx = max(0, j - int(SAMPLE_RATE * 0.005))
+                break
+            first_speech_idx = j
+            
+        normalized = normalized[first_speech_idx:last_speech_idx]
         
         # Apply gentle fades to each chunk
         faded = apply_fade(normalized, fade_ms=50)
