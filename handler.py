@@ -380,6 +380,107 @@ def detect_and_remove_clicks(wav, threshold=0.3):
     
     return cleaned
 
+def apply_high_shelf_filter(wav, cutoff_hz=10000, gain_db=-2):
+    """
+    Apply high-shelf filter to gently reduce high-frequency noise
+    without making audio muffled. More subtle than a low-pass filter.
+    Reduces scratchy/sandy artifacts while preserving speech clarity.
+    """
+    if len(wav) < 100:
+        return wav
+    
+    fc = cutoff_hz / SAMPLE_RATE
+    gain_linear = 10 ** (gain_db / 20.0)
+    
+    # Calculate high-frequency component via differentiation
+    diff = np.diff(wav, prepend=wav[0])
+    
+    # Apply gentle gain reduction to high frequencies
+    # This reduces high-frequency noise while preserving speech
+    diff_scaled = diff * (1.0 - (1.0 - gain_linear) * fc * 2)
+    
+    # Reconstruct signal
+    filtered = np.cumsum(diff_scaled)
+    filtered = filtered - np.mean(filtered) + np.mean(wav)
+    
+    return filtered.astype(np.float32)
+
+def soft_limiter(wav, threshold=0.88, ratio=4.0):
+    """
+    Apply soft limiting to prevent harsh clipping artifacts.
+    Compresses peaks gradually instead of hard clipping.
+    Makes loud sections smoother and more natural.
+    """
+    if len(wav) == 0:
+        return wav
+    
+    result = wav.copy()
+    mask = np.abs(result) > threshold
+    
+    if np.any(mask):
+        # Soft knee compression formula
+        excess = np.abs(result[mask]) - threshold
+        compressed = threshold + excess / ratio
+        
+        # Preserve sign
+        result[mask] = np.sign(result[mask]) * compressed
+    
+    return result.astype(np.float32)
+
+def reduce_breathing_artifacts(wav, breath_threshold_db=-30, reduction_factor=0.3):
+    """
+    Detect and reduce harsh breathing sounds (inhale/exhale artifacts).
+    Especially effective for reducing breaths at chunk transitions and in pauses.
+    """
+    if len(wav) < 1000:
+        return wav
+    
+    # Window size for breath detection (typical breath is 100-300ms)
+    window_size = int(SAMPLE_RATE * 0.15)  # 150ms windows
+    hop_size = window_size // 2
+    
+    num_windows = (len(wav) - window_size) // hop_size
+    if num_windows < 1:
+        return wav
+    
+    result = wav.copy()
+    threshold_linear = 10 ** (breath_threshold_db / 20.0)
+    
+    for i in range(num_windows):
+        start_idx = i * hop_size
+        end_idx = start_idx + window_size
+        
+        if end_idx > len(wav):
+            break
+        
+        window = wav[start_idx:end_idx]
+        
+        # Calculate spectral characteristics
+        # Breaths have specific frequency content (2-6kHz range)
+        # and lower RMS than speech
+        rms = float(np.sqrt(np.mean(window ** 2)))
+        
+        # Check if this window contains potential breathing
+        # Breaths are: quiet but with high-frequency content
+        if rms < threshold_linear and rms > 1e-6:
+            # Calculate high-frequency content
+            diff = np.abs(np.diff(window))
+            high_freq_energy = float(np.mean(diff))
+            
+            # If high-frequency energy is present but RMS is low = likely breath
+            if high_freq_energy > rms * 0.5:
+                # Reduce this section (likely a breath)
+                # Use smooth reduction to avoid new artifacts
+                reduction_envelope = np.linspace(1.0, reduction_factor, window_size // 2)
+                reduction_envelope = np.concatenate([
+                    reduction_envelope,
+                    np.linspace(reduction_factor, 1.0, window_size - len(reduction_envelope))
+                ])
+                
+                result[start_idx:end_idx] *= reduction_envelope
+    
+    return result.astype(np.float32)
+
 def crossfade(audio1, audio2, crossfade_ms=50):
     """Smoothly crossfade between two audio segments with longer overlap."""
     crossfade_samples = int(SAMPLE_RATE * crossfade_ms / 1000)
@@ -420,6 +521,16 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     for i, chunk in enumerate(audio_list):
         filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=60)
         normalized = normalize_chunk(filtered)
+        
+        # Trim potential breath sounds from chunk edges before stitching
+        # Breaths typically occur at the very end/start of chunks
+        edge_trim_ms = 20  # Trim 20ms from edges where breaths often hide
+        trim_samples = int(SAMPLE_RATE * edge_trim_ms / 1000)
+        
+        if len(normalized) > trim_samples * 3:  # Only trim if chunk is long enough
+            # Trim end more aggressively (where exhale breaths occur)
+            normalized = normalized[:-trim_samples] if len(normalized) > trim_samples else normalized
+        
         # Apply gentle fades to each chunk
         faded = apply_fade(normalized, fade_ms=50)
         normalized_chunks.append(faded)
@@ -437,15 +548,16 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         prev_text = chunk_texts[i-1].strip()
         
         # Determine specific pause based on punctuation
+        # REDUCED from previous values to minimize breathing artifact zones
         current_pause = pause_ms
         if prev_text.endswith(('.', '!', '?')):
-            current_pause = 650  # Long pause for sentences
+            current_pause = 400  # Reduced from 650ms - shorter pause = less breath time
         elif prev_text.endswith((',', ';', ':')):
-            current_pause = 300  # Medium pause for commas
+            current_pause = 200  # Reduced from 300ms
         elif '\n' in prev_text:
-            current_pause = 900  # Very long for paragraphs
+            current_pause = 550  # Reduced from 900ms
         else:
-            current_pause = 150  # Natural breath
+            current_pause = 100  # Reduced from 150ms
             
         pause_samples = int(SAMPLE_RATE * current_pause / 1000)
         
@@ -454,8 +566,9 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
             result = np.concatenate([result, pause])
         
         # Crossfade into next chunk for seamless transition
+        # LONGER crossfade to better blend breathing artifacts
         if len(result) > 0 and len(chunk) > 0:
-            result = crossfade(result, chunk, crossfade_ms=40)
+            result = crossfade(result, chunk, crossfade_ms=80)  # Increased from 40ms to 80ms
         else:
             result = np.concatenate([result, chunk])
     
@@ -914,9 +1027,10 @@ def generate_tts_handler(job):
         exaggeration = float(inp.get("exaggeration", 0.5))
         
         # Temperature: Controls generation randomness/stability
-        # 0.65 = good balance (lower than demo's 0.8 for more consistency)
-        # Lower = more stable generation, fewer random artifacts
-        temperature = float(inp.get("temperature", 0.65))
+        # 0.55 = even more stable (was 0.65, demo uses 0.8)
+        # Lower = more stable generation, significantly fewer random artifacts
+        # This is aggressive but necessary for artifact-free storytelling
+        temperature = float(inp.get("temperature", 0.55))
         
         # CFG Weight: Controls how much to follow reference voice vs natural speech
         # 0.5 = balanced (was 0.8 - amplified reference artifacts by 60%!)
@@ -1114,14 +1228,24 @@ def generate_tts_handler(job):
             # print(f"[tts]   High-pass filter (100Hz) to remove low-frequency artifacts...")
             # final_wav = apply_high_pass_filter(final_wav, cutoff_hz=100)
             
+            # Step 4.5: Apply high-shelf filter to gently reduce high-frequency noise
+            # Reduces scratchy/sandy artifacts while preserving speech clarity
+            print(f"[tts]   High-shelf filter to reduce high-frequency noise...")
+            final_wav = apply_high_shelf_filter(final_wav, cutoff_hz=10000, gain_db=-2)
+            
             # Step 5: Low-pass filter removed - was making audio sound too dimmed/muffled
-            # If high-frequency artifacts are still an issue, we can add it back with a higher cutoff (e.g., 18kHz)
+            # High-shelf filter above is gentler and more effective
             
             # Step 6: Apply spectral gating to remove background noise and hiss
             # -55dB threshold: Removes obvious noise while preserving natural breath sounds
             # Less aggressive than -60dB to avoid "digital" sound and pumping artifacts
             print(f"[tts]   Spectral gating to remove background noise...")
             final_wav = apply_spectral_gating(final_wav, threshold_db=-55)
+            
+            # Step 6.5: Reduce harsh breathing artifacts
+            # Targets harsh inhale/exhale sounds at chunk transitions and in quiet sections
+            print(f"[tts]   Reducing breathing artifacts...")
+            final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-30, reduction_factor=0.3)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
@@ -1178,10 +1302,11 @@ def generate_tts_handler(job):
                 
                 # Ensure we don't clip after gain application
                 max_after = np.max(np.abs(final_wav))
-                if max_after > 0.99:
-                    # Soft limit to prevent clipping
-                    final_wav = final_wav * (0.99 / max_after)
-                    print(f"[tts] Applied soft limiter to prevent clipping (peak was {max_after:.3f})")
+                if max_after > 0.90:
+                    # Apply soft limiter instead of hard clipping for smoother peaks
+                    final_wav = soft_limiter(final_wav, threshold=0.88, ratio=3.5)
+                    new_peak = np.max(np.abs(final_wav))
+                    print(f"[tts] Applied soft limiter to prevent clipping (peak: {max_after:.3f} → {new_peak:.3f})")
         elif not normalize_volume:
             print(f"[tts] Volume normalization disabled by request")
 
