@@ -523,10 +523,10 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
         normalized = normalize_chunk(filtered)
         
-        # Energy-based Tail Trimmer: Remove hallucinations/artifacts/hiss at chunk ends
-        # Any noise/thumps after speech stops are likely model artifacts or floor hiss
-        # Reduced from -45dB to -40dB to be more aggressive at cutting out trailing "shhhh" noise
-        tail_threshold = 10 ** (-40 / 20.0)
+        # Energy-based Tail Trimmer: Remove hallucinations at chunk ends
+        # Relaxed from -40dB to -48dB to prevent "skipping" quiet sentences
+        # This is more sensitive to legitimate low-volume speech
+        tail_threshold = 10 ** (-48 / 20.0)
         win_len = int(SAMPLE_RATE * 0.03) # 30ms window
         
         last_speech_idx = len(normalized)
@@ -1046,16 +1046,13 @@ def generate_tts_handler(job):
         exaggeration = float(inp.get("exaggeration", 0.5))
         
         # Temperature: Controls generation randomness/stability
-        # 0.55 = even more stable (was 0.65, demo uses 0.8)
-        # Lower = more stable generation, significantly fewer random artifacts
-        # This is aggressive but necessary for artifact-free storytelling
-        temperature = float(inp.get("temperature", 0.55))
+        # 0.6 = Stable middle ground (was 0.55 - too low can cause noise/skipping)
+        # Higher than before to prevent "mode collapse" where the model skips sentences
+        temperature = float(inp.get("temperature", 0.6))
         
-        # CFG Weight: Controls how much to follow reference voice vs natural speech
-        # 0.5 = balanced (was 0.8 - amplified reference artifacts by 60%!)
-        # Lower = cleaner audio, doesn't amplify reference imperfections
-        # Note: For voices with strong accents, this can be increased to 0.7 via API parameter
-        cfg_weight = float(inp.get("cfg_weight", 0.5))
+        # CFG Weight: 0.6 = Slightly more voice influence (was 0.5)
+        # Helps the model stay "focused" on the voice to avoid generating noise
+        cfg_weight = float(inp.get("cfg_weight", 0.6))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
