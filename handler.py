@@ -523,10 +523,10 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
         normalized = normalize_chunk(filtered)
         
-        # Energy-based Tail Trimmer: Remove hallucinations/artifacts at chunk ends
-        # We look for the last point where the audio is actually "speech" (>-45dB)
-        # Any noise/thumps after that are likely model artifacts
-        tail_threshold = 10 ** (-45 / 20.0)
+        # Energy-based Tail Trimmer: Remove hallucinations/artifacts/hiss at chunk ends
+        # Any noise/thumps after speech stops are likely model artifacts or floor hiss
+        # Reduced from -45dB to -40dB to be more aggressive at cutting out trailing "shhhh" noise
+        tail_threshold = 10 ** (-40 / 20.0)
         win_len = int(SAMPLE_RATE * 0.03) # 30ms window
         
         last_speech_idx = len(normalized)
@@ -1256,10 +1256,10 @@ def generate_tts_handler(job):
             # High-shelf filter above is gentler and more effective
             
             # Step 6: Apply spectral gating to remove background noise and hiss
-            # -55dB threshold: Removes obvious noise while preserving natural breath sounds
-            # Less aggressive than -60dB to avoid "digital" sound and pumping artifacts
+            # -60dB threshold: Highly aggressive to eliminate "shhhh" noise/hissing
+            # This ensures that quiet sections and sentence tails are perfectly silent
             print(f"[tts]   Spectral gating to remove background noise...")
-            final_wav = apply_spectral_gating(final_wav, threshold_db=-55)
+            final_wav = apply_spectral_gating(final_wav, threshold_db=-60)
             
             # Step 6.5: Reduce harsh breathing artifacts
             # Targets harsh inhale/exhale sounds at chunk transitions and in quiet sections
