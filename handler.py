@@ -524,9 +524,9 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         normalized = normalize_chunk(filtered)
         
         # Energy-based Tail Trimmer: Remove hallucinations at chunk ends
-        # Relaxed from -40dB to -48dB to prevent "skipping" quiet sentences
-        # This is more sensitive to legitimate low-volume speech
-        tail_threshold = 10 ** (-48 / 20.0)
+        # -45dB: Strategic balance between noise removal and speech protection
+        # Cuts out model hiss/artifacts that occur right after the sentence ends
+        tail_threshold = 10 ** (-45 / 20.0)
         win_len = int(SAMPLE_RATE * 0.03) # 30ms window
         
         last_speech_idx = len(normalized)
@@ -534,8 +534,9 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         for j in range(len(normalized) - win_len, max(0, len(normalized) - int(SAMPLE_RATE * 0.2)), -win_len):
             win_rms = np.sqrt(np.mean(normalized[j:j+win_len]**2))
             if win_rms > tail_threshold:
-                # Add a tiny padding to not cut off words harshly
-                last_speech_idx = j + win_len + int(SAMPLE_RATE * 0.01)
+                # Removed 10ms padding to ensure no noise tail remains
+                # We stop exactly where the energy drops below threshold
+                last_speech_idx = j + win_len
                 break
             last_speech_idx = j
             
@@ -544,14 +545,15 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         for j in range(0, min(len(normalized), int(SAMPLE_RATE * 0.1)), win_len):
             win_rms = np.sqrt(np.mean(normalized[j:j+win_len]**2))
             if win_rms > tail_threshold:
-                first_speech_idx = max(0, j - int(SAMPLE_RATE * 0.005))
+                # Tightened start idx to eliminate breaths
+                first_speech_idx = j
                 break
             first_speech_idx = j
             
         normalized = normalized[first_speech_idx:last_speech_idx]
         
-        # Apply gentle fades to each chunk
-        faded = apply_fade(normalized, fade_ms=50)
+        # Apply longer fades (100ms) to each chunk for a perfect transition to silence
+        faded = apply_fade(normalized, fade_ms=100)
         normalized_chunks.append(faded)
     
     if len(normalized_chunks) == 1:
