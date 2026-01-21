@@ -530,15 +530,17 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         
         # Step B: Energy-based Tail Trimmer (CRITICAL)
         # We trim BEFORE normalization so thumps don't squash the speech volume
-        tail_threshold = 10 ** (-42 / 20.0)
+        # LOWERED threshold from -42dB to -45dB to catch quieter breathing artifacts
+        tail_threshold = 10 ** (-45 / 20.0)
         win_len = int(SAMPLE_RATE * 0.04) # 40ms window
         
         # Default boundaries
         last_speech_idx = len(filtered)
         first_speech_idx = 0
         
-        # Scan backwards from the end (up to 400ms) to cut out thumps/hallucinations
-        max_scan_back = int(SAMPLE_RATE * 0.4)
+        # Scan backwards from the end (up to 600ms) to cut out thumps/hallucinations/breathing
+        # EXTENDED from 400ms to 600ms to catch longer breathing artifacts and clicks
+        max_scan_back = int(SAMPLE_RATE * 0.6)
         for j in range(len(filtered) - win_len, max(0, len(filtered) - max_scan_back), -win_len//2):
             win_rms = np.sqrt(np.mean(filtered[j:j+win_len]**2))
             if win_rms > tail_threshold:
@@ -556,11 +558,15 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
             
         trimmed = filtered[first_speech_idx:last_speech_idx]
         
-        # Step C: Normalize the trimmed speech
-        # Now that thumps are gone, the normalization will be much more accurate
-        normalized = normalize_chunk(trimmed)
+        # Step C: Apply breath reduction BEFORE normalization to remove trailing artifacts
+        # This catches breathing sounds that might be right at the edge of detection
+        breath_reduced = reduce_breathing_artifacts(trimmed, breath_threshold_db=-38, reduction_factor=0.15)
         
-        # Step D: Apply subtle fades for seamless stitching
+        # Step D: Normalize the trimmed speech
+        # Now that thumps and initial breaths are gone, the normalization will be much more accurate
+        normalized = normalize_chunk(breath_reduced)
+        
+        # Step E: Apply subtle fades for seamless stitching
         faded = apply_fade(normalized, fade_ms=80)
         processed_chunks.append(faded)
     
@@ -1268,10 +1274,11 @@ def generate_tts_handler(job):
             print(f"[tts]   Spectral gating to remove background noise...")
             final_wav = apply_spectral_gating(final_wav, threshold_db=-60)
             
-            # Step 6.5: Reduce harsh breathing artifacts
-            # Enhanced with ZCR detection and more aggressive reduction for cleaner pauses
-            print(f"[tts]   Reducing breathing artifacts...")
-            final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-35, reduction_factor=0.2)
+            # Step 6.5: Reduce harsh breathing artifacts (second pass after stitching)
+            # Enhanced with ZCR detection and even more aggressive reduction for cleaner pauses
+            # This is the second pass - first pass was in chunk processing before normalization
+            print(f"[tts]   Reducing breathing artifacts (final pass)...")
+            final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-32, reduction_factor=0.12)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
