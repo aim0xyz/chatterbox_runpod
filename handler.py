@@ -526,7 +526,8 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     for i, chunk in enumerate(audio_list):
         # Step A: High-pass filter to remove low-frequency rumbles first
         # Doing this before trimming helps the RMS check ignore sub-bass noise
-        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
+        # INCREASED to 120Hz to aggressively target "wind/rumble" noise
+        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=120)
         
         # Step B: Energy-based Tail Trimmer (CRITICAL)
         # We trim BEFORE normalization so thumps don't squash the speech volume
@@ -1265,10 +1266,11 @@ def generate_tts_handler(job):
             # Step 5: Low-pass filter removed - was making audio sound too dimmed/muffled
             # High-shelf filter above is gentler and more effective
             
-            # Step 6: Spectral gating REMOVED
-            # It was causing artifacts and lisping by removing high frequency content
-            # print(f"[tts]   Spectral gating to remove background noise...")
-            # final_wav = apply_spectral_gating(final_wav, threshold_db=-50)
+            # Step 6: Gentle spectral gating to remove background hiss/wind
+            # Re-enabled but at -65dB (very subtle) to just kill the floor noise
+            # This helps with the "wind blowing" sound without causing lisping
+            print(f"[tts]   Gentle spectral gating for hiss removal...")
+            final_wav = apply_spectral_gating(final_wav, threshold_db=-65)
             
             # Step 6.5: Breath reduction REMOVED
             # It was incorrectly identifying sibilants as breathing noise
