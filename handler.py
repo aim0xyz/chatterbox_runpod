@@ -103,53 +103,31 @@ def get_user_dir(user_id):
     return d
 
 def find_voice(user_id=None, filename=None, preset=None):
-    try:
-        print(f"[debug] find_voice called with: preset='{preset}', user_id='{user_id}', filename='{filename}'")
-        
-        if preset:
-            # Preset can be either "Ruby" or "de/Ruby.mp3" (with language folder)
-            # 1. Try direct path (handles both "de/Ruby.mp3" and "Ruby")
-            for ext in ['', '.wav', '.mp3', '.flac']:
-                p = PRESET_ROOT / f"{preset}{ext}"
-                if p.exists():
-                    print(f"[debug] Found exact preset match: {p}")
-                    return p
-            
-            # 2. Try without extension if path includes one
-            preset_path = Path(preset)
-            if preset_path.suffix:
-                p = PRESET_ROOT / preset_path
-                if p.exists():
-                    print(f"[debug] Found preset with full path: {p}")
-                    return p
-            
-            # 3. Case-insensitive / normalized match (search all language folders)
-            clean_preset = str(preset).lower().replace(" ", "_").replace("-", "_")
-            # Remove language prefix if present (e.g., "de/ruby" -> "ruby")
-            if "/" in clean_preset:
-                clean_preset = clean_preset.split("/")[-1]
-            
-            for f in PRESET_ROOT.rglob("*"):
-                if not f.is_file(): 
-                    continue
-                f_clean = f.stem.lower().replace(" ", "_").replace("-", "_")
-                if clean_preset in f_clean or f_clean in clean_preset:
-                    print(f"[debug] Found fuzzy preset match: {f} (matched '{clean_preset}')")
-                    return f
-                    
-        if user_id and filename:
-            p = get_user_dir(user_id) / filename
+    if preset:
+        # Preset can be either "Ruby" or "de/Ruby.mp3" (with language folder)
+        # Try direct path first (handles both "de/Ruby.mp3" and "Ruby")
+        for ext in ['', '.wav', '.mp3', '.flac']:
+            p = PRESET_ROOT / f"{preset}{ext}"
             if p.exists():
-                print(f"[debug] Found user voice: {p}")
                 return p
-            else:
-                print(f"[debug] User voice file not found at: {p}")
-                
-    except Exception as e:
-        print(f"[error] find_voice failed: {e}")
-        traceback.print_exc()
         
-    print(f"[debug] No voice found for preset='{preset}' or user='{user_id}'/'{filename}'")
+        # Try without extension if path includes one
+        preset_path = Path(preset)
+        if preset_path.suffix:
+            p = PRESET_ROOT / preset_path
+            if p.exists():
+                return p
+        
+        # Fallback: search recursively (slower but catches edge cases)
+        for f in PRESET_ROOT.rglob(f"*{preset}*"):
+            if f.is_file():
+                return f
+    
+    if user_id and filename:
+        p = get_user_dir(user_id) / filename
+        if p.exists():
+            return p
+    
     return None
 
 def get_voice_language(user_id=None, filename=None):
@@ -198,68 +176,41 @@ def clean_text(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 def preprocess_german_text(text):
-    """
-    Fix common German pronunciation issues for TTS.
-    - Enforces 'st' -> 'scht' and 'sp' -> 'schp' pronunciation.
-    - Handles compound words via dictionary replacements.
-    """
-    if not text:
-        return text
-        
-    # 1. Dictionary of specific compound word fixes
-    # Add problematic words here as they are discovered
+    """Apply German-specific phonetic fixes for better TTS pronunciation."""
+    # Fix common German words where 's' before 't' or 'p' should be pronounced "sch"
+    # This is a workaround for TTS models that don't handle German phonetics well
     replacements = {
-        "seestern": "seeschtern",
-        "stein": "schtein",
-        "spiel": "schpiel",
-        "stern": "schtern",
-        "stadt": "schtadt",
-        "sport": "schport",
-        "spaß": "schpaß",
-        "still": "schtill",
-        "stark": "schtark",
-        "strom": "schtrom",
-        "strand": "schtrand",
-        "stoff": "schtoff",
-        "stufe": "schtufe",
-        "suppe": "suppe", # Protect simple s words
+        # Common words with "st" that should sound like "scht"
+        r'\bSeestern\b': 'Seeschtern',
+        r'\bstern\b': 'schtern',
+        r'\bStern\b': 'Schtern',
+        r'\bstein\b': 'schtein',
+        r'\bStein\b': 'Schtein',
+        r'\bstehen\b': 'schtehen',
+        r'\bStehen\b': 'Schtehen',
+        r'\bsteht\b': 'schteht',
+        r'\bsteigen\b': 'schteigen',
+        r'\bstill\b': 'schtill',
+        r'\bStill\b': 'Schtill',
+        r'\bstreuen\b': 'schtreuen',
+        r'\bstreute\b': 'schtreute',
+        
+        # Words with "sp" that should sound like "schp"
+        r'\bspäter\b': 'schpäter',
+        r'\bSpäter\b': 'Schpäter',
+        r'\bspielen\b': 'schpielen',
+        r'\bSpielen\b': 'Schpielen',
+        r'\bspielt\b': 'schpielt',
+        r'\bsprechen\b': 'schprechen',
+        r'\bSprechen\b': 'Schprechen',
+        r'\bspricht\b': 'schpricht',
+        r'\bsprach\b': 'schprach',
     }
     
-    # Process text to apply replacements (case-insensitive key matching)
-    words = text.split()
-    processed_words = []
+    for pattern, replacement in replacements.items():
+        text = re.sub(pattern, replacement, text)
     
-    for word in words:
-        # Clean punctuation
-        clean_word = re.sub(r'[^\wäöüß]', '', word.lower())
-        
-        # Check dictionary
-        if clean_word in replacements:
-            # Match original case (simple heuristic)
-            replacement = replacements[clean_word]
-            if word[0].isupper():
-                replacement = replacement.capitalize()
-            # Restore punctuation
-            if not word[-1].isalnum():
-                replacement += word[-1]
-            processed_words.append(replacement)
-            continue
-            
-        # 2. General Rule: 'st' at start of word -> 'scht'
-        if word.lower().startswith("st"):
-             replacement = "sch" + word[1:] # Replace 's' with 'sch', keep 't'
-             processed_words.append(replacement)
-             continue
-             
-        # 3. General Rule: 'sp' at start of word -> 'schp'
-        if word.lower().startswith("sp"):
-             replacement = "sch" + word[1:] # Replace 's' with 'sch', keep 'p'
-             processed_words.append(replacement)
-             continue
-             
-        processed_words.append(word)
-        
-    return " ".join(processed_words)
+    return text
 
 def split_sentences(text):
     if not text:
@@ -479,112 +430,6 @@ def detect_and_remove_clicks(wav, threshold=0.3):
     
     return cleaned
 
-def apply_high_shelf_filter(wav, cutoff_hz=10000, gain_db=-2):
-    """
-    Apply high-shelf filter to gently reduce high-frequency noise
-    without making audio muffled. More subtle than a low-pass filter.
-    Reduces scratchy/sandy artifacts while preserving speech clarity.
-    """
-    if len(wav) < 100:
-        return wav
-    
-    fc = cutoff_hz / SAMPLE_RATE
-    gain_linear = 10 ** (gain_db / 20.0)
-    
-    # Calculate high-frequency component via differentiation
-    diff = np.diff(wav, prepend=wav[0])
-    
-    # Apply gentle gain reduction to high frequencies
-    # This reduces high-frequency noise while preserving speech
-    diff_scaled = diff * (1.0 - (1.0 - gain_linear) * fc * 2)
-    
-    # Reconstruct signal
-    filtered = np.cumsum(diff_scaled)
-    filtered = filtered - np.mean(filtered) + np.mean(wav)
-    
-    return filtered.astype(np.float32)
-
-def soft_limiter(wav, threshold=0.88, ratio=4.0):
-    """
-    Apply soft limiting to prevent harsh clipping artifacts.
-    Compresses peaks gradually instead of hard clipping.
-    Makes loud sections smoother and more natural.
-    """
-    if len(wav) == 0:
-        return wav
-    
-    result = wav.copy()
-    mask = np.abs(result) > threshold
-    
-    if np.any(mask):
-        # Soft knee compression formula
-        excess = np.abs(result[mask]) - threshold
-        compressed = threshold + excess / ratio
-        
-        # Preserve sign
-        result[mask] = np.sign(result[mask]) * compressed
-    
-    return result.astype(np.float32)
-
-def reduce_breathing_artifacts(wav, breath_threshold_db=-35, reduction_factor=0.2):
-    """
-    Enhanced detection and reduction of harsh breathing sounds (inhale/exhale artifacts).
-    Uses Zero-Crossing Rate (ZCR) and spectral energy balance for better accuracy.
-    """
-    if len(wav) < 1000:
-        return wav
-    
-    # Window size for breath detection (typical breath is 100-300ms)
-    window_size = int(SAMPLE_RATE * 0.10)  # 100ms windows
-    hop_size = window_size // 2
-    
-    num_windows = (len(wav) - window_size) // hop_size
-    if num_windows < 1:
-        return wav
-    
-    result = wav.copy()
-    threshold_linear = 10 ** (breath_threshold_db / 20.0)
-    
-    for i in range(num_windows):
-        start_idx = i * hop_size
-        end_idx = start_idx + window_size
-        
-        window = wav[start_idx:end_idx]
-        rms = float(np.sqrt(np.mean(window ** 2)))
-        
-        # Breaths are quiet (low RMS) but have high zero-crossing rate (hiss-like)
-        if rms < threshold_linear and rms > 1e-6:
-            # Calculate Zero-Crossing Rate (ZCR)
-            zcr = np.mean(np.abs(np.diff(np.sign(window)))) / 2
-            
-            # Breaths typically have ZCR between 0.05 and 0.4
-            # Speech usually has lower ZCR (vowels) or much higher/different patterns
-            if zcr > 0.08:
-                # Calculate high-frequency energy ratio
-                diff = np.abs(np.diff(window))
-                hf_energy = float(np.mean(diff))
-                
-                # If high-frequency energy is dominant, it's a breath or hiss
-                if hf_energy > rms * 0.6:
-                    # Apply smooth reduction envelope
-                    reduction_envelope = np.linspace(1.0, reduction_factor, window_size // 4)
-                    middle = np.ones(window_size - (window_size // 2)) * reduction_factor
-                    reduction_envelope = np.concatenate([
-                        reduction_envelope,
-                        middle,
-                        np.linspace(reduction_factor, 1.0, window_size // 4)
-                    ])
-                    
-                    # Ensure same length
-                    if len(reduction_envelope) > window_size:
-                        reduction_envelope = reduction_envelope[:window_size]
-                    elif len(reduction_envelope) < window_size:
-                        reduction_envelope = np.pad(reduction_envelope, (0, window_size - len(reduction_envelope)), 'edge')
-                    
-                    result[start_idx:end_idx] *= reduction_envelope
-    
-    return result.astype(np.float32)
-
 def crossfade(audio1, audio2, crossfade_ms=50):
     """Smoothly crossfade between two audio segments with longer overlap."""
     crossfade_samples = int(SAMPLE_RATE * crossfade_ms / 1000)
@@ -620,77 +465,37 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     if not audio_list:
         return np.array([], dtype=np.float32)
     
-    # Process and normalize each chunk individually for consistent volume
-    processed_chunks = []
+    # Normalize each chunk individually for consistent volume
+    normalized_chunks = []
     for i, chunk in enumerate(audio_list):
-        # Step A: High-pass filter to remove low-frequency rumbles first
-        # Doing this before trimming helps the RMS check ignore sub-bass noise
-        # 80Hz is safer for deep male voices but still kills wind rumble
-        # Increased to 100Hz to be safer against pops/thumps
-        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
-        
-        # Step B: Energy-based Tail Trimmer (CRITICAL)
-        # We trim BEFORE normalization so thumps don't squash the speech volume
-        # INCREASED threshold from -45dB to -38dB to more aggressively catch breathing artifacts
-        # Breathing typically ranges from -40dB to -30dB, so -38dB should catch most of it
-        tail_threshold = 10 ** (-38 / 20.0)
-        win_len = int(SAMPLE_RATE * 0.04) # 40ms window
-        
-        # Default boundaries
-        last_speech_idx = len(filtered)
-        first_speech_idx = 0
-        
-        # Scan backwards from the end (up to 500ms) to cut out breathing/hallucinations
-        # INCREASED scan range from 300ms to 500ms to catch breathing further from the end
-        max_scan_back = int(SAMPLE_RATE * 0.5)
-        for j in range(len(filtered) - win_len, max(0, len(filtered) - max_scan_back), -win_len//2):
-            win_rms = np.sqrt(np.mean(filtered[j:j+win_len]**2))
-            if win_rms > tail_threshold:
-                last_speech_idx = j + win_len
-                break
-            last_speech_idx = j
-            
-        # Also clean up the start for inhale/click artifacts
-        for j in range(0, min(len(filtered), int(SAMPLE_RATE * 0.15)), win_len//2):
-            win_rms = np.sqrt(np.mean(filtered[j:j+win_len]**2))
-            if win_rms > tail_threshold:
-                first_speech_idx = max(0, j - win_len)
-                break
-            first_speech_idx = j
-            
-        trimmed = filtered[first_speech_idx:last_speech_idx]
-        
-        # Step C: Normalize the trimmed speech
-        # Now that thumps are gone, the normalization will be much more accurate
-        normalized = normalize_chunk(trimmed)
-        
-        # Step D: Apply subtle fades for seamless stitching
-        faded = apply_fade(normalized, fade_ms=30) # Reduced from 50ms to prevent wind-like smearing
-        processed_chunks.append(faded)
+        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=60)
+        normalized = normalize_chunk(filtered)
+        # Apply gentle fades to each chunk
+        faded = apply_fade(normalized, fade_ms=50)
+        normalized_chunks.append(faded)
     
-    if len(processed_chunks) == 1:
-        return processed_chunks[0]
+    if len(normalized_chunks) == 1:
+        return normalized_chunks[0]
     
     # Stitch with dynamic storytelling pauses
-    result = processed_chunks[0]
+    result = normalized_chunks[0]
     
     import time
     stitch_start = time.time()
     
-    for i, chunk in enumerate(processed_chunks[1:], 1):
+    for i, chunk in enumerate(normalized_chunks[1:], 1):
         prev_text = chunk_texts[i-1].strip()
         
         # Determine specific pause based on punctuation
-        # REDUCED from previous values to minimize breathing artifact zones
         current_pause = pause_ms
         if prev_text.endswith(('.', '!', '?')):
-            current_pause = 500  # Tuned for natural flow (was 400)
+            current_pause = 650  # Long pause for sentences
         elif prev_text.endswith((',', ';', ':')):
-            current_pause = 250  # Tuned (was 200)
+            current_pause = 300  # Medium pause for commas
         elif '\n' in prev_text:
-            current_pause = 700  # Tuned (was 550)
+            current_pause = 900  # Very long for paragraphs
         else:
-            current_pause = 100  # Reduced from 150ms
+            current_pause = 150  # Natural breath
             
         pause_samples = int(SAMPLE_RATE * current_pause / 1000)
         
@@ -699,9 +504,8 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
             result = np.concatenate([result, pause])
         
         # Crossfade into next chunk for seamless transition
-        # LONGER crossfade to better blend breathing artifacts
         if len(result) > 0 and len(chunk) > 0:
-            result = crossfade(result, chunk, crossfade_ms=60)  # Increased to 60ms for smoother blending
+            result = crossfade(result, chunk, crossfade_ms=40)
         else:
             result = np.concatenate([result, chunk])
     
@@ -716,11 +520,11 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     # The crossfading should handle most artifacts, so this is only needed if issues persist
     # Uncomment the code below if you still hear artifacts after crossfading:
     #
-    # if len(result) > 200 and len(processed_chunks) > 1:
+    # if len(result) > 200 and len(normalized_chunks) > 1:
     #     transition_window = int(SAMPLE_RATE * 0.05)  # 50ms window
     #     smoothed = result.copy()
-    #     current_pos = len(processed_chunks[0])
-    #     for i in range(1, len(processed_chunks)):
+    #     current_pos = len(normalized_chunks[0])
+    #     for i in range(1, len(normalized_chunks)):
     #         start_idx = max(0, current_pos - transition_window)
     #         end_idx = min(len(smoothed), current_pos + transition_window)
     #         if end_idx > start_idx + 10:
@@ -728,7 +532,7 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     #             window = 3
     #             for j in range(start_idx + window, end_idx - window):
     #                 smoothed[j] = np.mean(result[j-window:j+window+1])
-    #         current_pos += len(processed_chunks[i]) + pause_samples
+    #         current_pos += len(normalized_chunks[i]) + pause_samples
     #     result = smoothed.astype(np.float32)
     
     final_rms = float(np.sqrt(np.mean(result ** 2))) if len(result) > 0 else 0.0
@@ -1078,25 +882,17 @@ def generate_tts_handler(job):
         language = inp.get("language", "en")
         
         # Voice language parameter - language of the voice sample (for accent control)
-        # For preset voices: auto-detect from folder path (e.g., "de/Ruby.mp3" = German)
-        # For user voices: get from input parameter, then auto-detect from stored metadata,
-        # finally default to English
+        # CRITICAL: Preset voices are ALWAYS English, so set voice_language = "en" for preset voices
+        # For user voices, try to get from input parameter, then auto-detect from stored metadata,
+        # finally default to target language
         voice_language = inp.get("voice_language")
         
         voice_language_from_metadata = False
         
-        # If using a preset voice, extract language from path
+        # If using a preset voice, preset voices are ALWAYS English
         if preset_voice:
-            # Check if preset uses language-specific folder structure (e.g., "de/Ruby.mp3")
-            if "/" in preset_voice or "\\" in preset_voice:
-                # Extract language code from path (e.g., "de/Ruby.mp3" -> "de")
-                preset_lang = preset_voice.split("/")[0].split("\\")[0]
-                voice_language = preset_lang
-                print(f"[tts] Preset voice language auto-detected from path: '{voice_language}' (from '{preset_voice}')")
-            else:
-                # Fallback: assume English for backward compatibility with flat structure
-                voice_language = "en"
-                print(f"[tts] Preset voice without language folder - defaulting to 'en'")
+            voice_language = "en"
+            print(f"[tts] Preset voice detected - setting voice_language to 'en' (preset voices are English-only)")
         elif voice_language is None and user_id and embedding_filename:
             # Auto-detect from stored metadata if not provided (only for user voices)
             stored_language = get_voice_language(user_id, embedding_filename)
@@ -1105,14 +901,10 @@ def generate_tts_handler(job):
                 voice_language_from_metadata = True
                 print(f"[tts] Auto-detected voice language from metadata: {voice_language}")
         
-        # Default to English if still not found (safest assumption for user voices)
-        # IMPORTANT: Defaulting to target language causes cross-lingual accent issues
-        # because the system thinks the voice is already in the target language
-        # and skips accent control, resulting in English accent in German text, etc.
-        # Most user voice samples are in English, so this is the safest default.
+        # Default to target language if still not found (only for user voices without metadata)
         if voice_language is None:
-            voice_language = 'en'
-            print(f"[tts] Voice language not specified, defaulting to English ('en') for cross-lingual compatibility")
+            voice_language = language
+            print(f"[tts] Voice language not specified, defaulting to target language: {language}")
         
         # Determine if voice language was defaulted (not explicitly known)
         voice_language_was_auto_detected = (
@@ -1137,17 +929,10 @@ def generate_tts_handler(job):
             # For preset voices (always English initially), use target language accent if languages differ
             preserve_voice_accent = languages_match
         else:
-            # Users voices:
-            # If languages match (en->en), preserve accent (natural).
-            # If languages differ (en->de), DO NOT preserve accent by default, otherwise you get English accent in German.
-            # This fixes the "inconsistent accent" issue.
-            if languages_match:
-                preserve_voice_accent = True
-            else:
-                preserve_voice_accent = False
-                print(f"[tts] Cross-lingual user voice detected ({voice_language} -> {language}): Prioritizing target accent")
-            
-            # Legacy override: if voice_language was unknown, rely on target language
+            # Users voices: ALWAYS preserve voice accent by default (even across languages)
+            # This prevents your English voice from sounding French when reading French text
+            # Only switch if voice_language was completely unknown (no metadata)
+            preserve_voice_accent = True
             if voice_language_was_auto_detected:
                 preserve_voice_accent = False
         
@@ -1157,42 +942,25 @@ def generate_tts_handler(job):
         # to ensure target language accent is used (e.g., German accent for German text, even with English voice)
         if preserve_voice_accent:
             accent_control = 0.0
-            print(f"[tts] ✅ Preserving voice accent (explicitly requested or languages match)")
+            print(f"[tts] ✅ Preserving voice accent (explicitly requested or languages match with explicit voice_language)")
         else:
-            # Force maximum accent control when languages differ to kill the source accent
+            # Force maximum accent control when languages differ OR when voice_language was auto-detected
             # This ensures target language accent is always used
-            # If user didn't specify accent_control, default to 1.0 (MAX) for cross-lingual cases
-            user_accent_control = inp.get("accent_control")
-            if user_accent_control is not None:
-                accent_control = float(user_accent_control)
-            else:
-                accent_control = 1.0 # Default to MAX for cross-lingual to ensure correct pronunciation
-                
+            accent_control = float(inp.get("accent_control", 1.0))
             if not languages_match or voice_language_was_auto_detected:
-                print(f"[tts] ⚠️  Using target language accent ({language}) - accent_control={accent_control:.2f} (MAXIMUM recommended)")
+                print(f"[tts] ⚠️  Using target language accent ({language}) - accent_control={accent_control:.2f} (MAXIMUM)")
                 print(f"[tts]   Reason: {'languages differ' if not languages_match else 'voice_language was auto-detected'}")
         
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
 
-        # ===== OPTIMIZED PARAMETERS FOR CLEAN STORYTELLING AUDIO =====
-        # These defaults match Resemble AI's official Multilingual demo for best quality
-        # Balances voice cloning accuracy with clean, artifact-free audio generation
-        
-        # Exaggeration: Controls prosody expressiveness
-        # 0.45 = balanced
-        # Higher helps articulation, preventing "mumbling/monster" sounds
-        # Reduced to 0.5 per recommendation for better stability
-        exaggeration = float(inp.get("exaggeration", 0.5))
-        
-        # Temperature: Controls generation randomness/stability
-        # 0.7 = Higher stability against mode collapse (was 0.65)
-        # REDUCED to 0.55 to prevent "weird sounds" and hallucinations between sentences
-        temperature = float(inp.get("temperature", 0.55))
-        
-        # CFG Weight: 0.5 = Natural flow (was 0.55)
-        # Lowering this further reduces the "forcing" that causes glitches
-        cfg_weight = float(inp.get("cfg_weight", 0.5))
+        # Tweak parameters for better voice cloning fidelity (faithful to user's style)
+        # Lower exaggeration = less forced drama, more natural to the original voice (was 0.85)
+        # Slightly lower temperature = more stability/less random variation (was 0.72)
+        # Higher cfg_weight = more influence from the voice sample style (was 0.5)
+        exaggeration = float(inp.get("exaggeration", 0.6))
+        temperature = float(inp.get("temperature", 0.65))
+        cfg_weight = float(inp.get("cfg_weight", 0.8))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
@@ -1210,9 +978,7 @@ def generate_tts_handler(job):
             print(f"[tts] Accent control: {accent_control:.2f} (will prioritize {language} accent for consistency)")
 
         voice_path = find_voice(user_id, embedding_filename, preset_voice)
-        voice_path = find_voice(user_id, embedding_filename, preset_voice)
         if not voice_path:
-            print(f"[error] Voice not found. Aborting generation.")
             return {"error": "Voice file not found"}
 
         print(f"[tts] Voice: {voice_path}")
@@ -1260,29 +1026,23 @@ def generate_tts_handler(job):
                     print(f"[tts] Preserving voice accent: using original parameters to keep {voice_language} accent")
                     print(f"[tts] Parameters: temp={base_temperature:.2f}, cfg={base_cfg_weight:.2f}, exaggeration={base_exaggeration:.2f}")
                 elif accent_control > 0.0:
-                    # ⚠️ MAXIMUM AGGRESSIVE ADJUSTMENTS ⚠️
-                    # This is the most extreme setting possible before audio quality degrades
-                    # Goal: Force target language accent even from English voice samples
-                    
+                    # Extremely aggressive adjustments for consistent target language accent across all chunks
                     # Higher temperature = more variation = less voice accent influence
-                    # With accent_control=1.0, add +0.75 to maximize randomness (up to temp=1.3)
-                    # This STRONGLY reduces voice embedding's accent influence
-                    base_temperature = min(temperature + (accent_control * 0.75), 1.3)
+                    # With accent_control=1.0, maximize temperature to reduce voice accent as much as possible
+                    base_temperature = min(temperature + (accent_control * 0.5), 1.0)
                     
                     # Lower cfg_weight = less voice embedding influence = more language model control
-                    # With accent_control=1.0, reduce cfg_weight by 90% (minimum 0.05)
-                    # This almost completely removes voice embedding accent bias
-                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.9), 0.05)
+                    # With accent_control=1.0, minimize cfg_weight to absolute minimum to prioritize target language accent
+                    # Reduce by 80% to strongly favor language model over voice embedding (clamped to minimum 0.1)
+                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.8), 0.1)
                     
-                    # Reduce exaggeration significantly to flatten prosody and make accent more neutral
-                    # With accent_control=1.0, reduce by 40% to minimize voice-specific characteristics
-                    base_exaggeration = exaggeration * (1.0 - accent_control * 0.4)
+                    # Reduce exaggeration more to make accent more consistent and prioritize target language
+                    base_exaggeration = exaggeration * (1.0 - accent_control * 0.2)
                     
-                    print(f"[tts] ⚠️ MAXIMUM accent control (attempting to force {language} accent from {voice_language} voice)")
-                    print(f"[tts] Parameters: temp={base_temperature:.2f} (was {temperature:.2f}), "
+                    print(f"[tts] Accent control active (EXTREME strength for {language} accent): temp={base_temperature:.2f} (was {temperature:.2f}), "
                           f"cfg={base_cfg_weight:.2f} (was {cfg_weight:.2f}), "
                           f"exaggeration={base_exaggeration:.2f} (was {exaggeration:.2f})")
-                    print(f"[tts] ⚠️ Note: English voices may still retain slight accent when generating non-English speech")
+                    print(f"[tts] These parameters will be applied consistently to ALL chunks to ensure {language} accent")
             else:
                 # Languages match - use consistent parameters for all chunks to ensure accent consistency
                 # Lower temperature slightly to reduce variation and ensure consistent accent
@@ -1401,25 +1161,13 @@ def generate_tts_handler(job):
             # print(f"[tts]   High-pass filter (100Hz) to remove low-frequency artifacts...")
             # final_wav = apply_high_pass_filter(final_wav, cutoff_hz=100)
             
-            # Step 4.5: High-shelf filter REMOVED to prevent lisping/muffled consonants
-            # The filter was reducing high-frequency clarity of sibilants (s, sh, ch)
-            # Spectral gating below handles high-frequency noise more selectively
-            # print(f"[tts]   High-shelf filter to reduce high-frequency noise...")
-            # final_wav = apply_high_shelf_filter(final_wav, cutoff_hz=10000, gain_db=-2)
-            
             # Step 5: Low-pass filter removed - was making audio sound too dimmed/muffled
-            # High-shelf filter above is gentler and more effective
+            # If high-frequency artifacts are still an issue, we can add it back with a higher cutoff (e.g., 18kHz)
             
-            # Step 6: Gentle spectral gating to remove background hiss/wind
-            # Re-enabled but at -65dB (very subtle) to just kill the floor noise
-            # This helps with the "wind blowing" sound without causing lisping
-            print(f"[tts]   Gentle spectral gating for hiss removal...")
-            final_wav = apply_spectral_gating(final_wav, threshold_db=-65)
-            
-            # Step 6.5: Breath reduction REMOVED
-            # It was incorrectly identifying sibilants as breathing noise
-            # print(f"[tts]   Reducing breathing artifacts (final pass)...")
-            # final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-30, reduction_factor=0.15)
+            # Step 6: Apply spectral gating to remove background noise and hiss
+            # Reduced threshold from -40dB to -50dB to make gating less aggressive and preserve clarity
+            print(f"[tts]   Spectral gating to remove background noise...")
+            final_wav = apply_spectral_gating(final_wav, threshold_db=-60)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
@@ -1476,11 +1224,10 @@ def generate_tts_handler(job):
                 
                 # Ensure we don't clip after gain application
                 max_after = np.max(np.abs(final_wav))
-                if max_after > 0.90:
-                    # Apply soft limiter instead of hard clipping for smoother peaks
-                    final_wav = soft_limiter(final_wav, threshold=0.88, ratio=3.5)
-                    new_peak = np.max(np.abs(final_wav))
-                    print(f"[tts] Applied soft limiter to prevent clipping (peak: {max_after:.3f} → {new_peak:.3f})")
+                if max_after > 0.99:
+                    # Soft limit to prevent clipping
+                    final_wav = final_wav * (0.99 / max_after)
+                    print(f"[tts] Applied soft limiter to prevent clipping (peak was {max_after:.3f})")
         elif not normalize_volume:
             print(f"[tts] Volume normalization disabled by request")
 
