@@ -107,19 +107,31 @@ def find_voice(user_id=None, filename=None, preset=None):
         print(f"[debug] find_voice called with: preset='{preset}', user_id='{user_id}', filename='{filename}'")
         
         if preset:
-            # 1. Direct match
+            # Preset can be either "Ruby" or "de/Ruby.mp3" (with language folder)
+            # 1. Try direct path (handles both "de/Ruby.mp3" and "Ruby")
             for ext in ['', '.wav', '.mp3', '.flac']:
                 p = PRESET_ROOT / f"{preset}{ext}"
                 if p.exists():
                     print(f"[debug] Found exact preset match: {p}")
                     return p
             
-            # 2. Case-insensitive / normalized match
-            # content matching "santa claus" -> "santa_claus" or "SantaClaus"
-            clean_preset = str(preset).lower().replace(" ", "_").replace("-", "_")
+            # 2. Try without extension if path includes one
+            preset_path = Path(preset)
+            if preset_path.suffix:
+                p = PRESET_ROOT / preset_path
+                if p.exists():
+                    print(f"[debug] Found preset with full path: {p}")
+                    return p
             
-            for f in PRESET_ROOT.iterdir():
-                if not f.is_file(): continue
+            # 3. Case-insensitive / normalized match (search all language folders)
+            clean_preset = str(preset).lower().replace(" ", "_").replace("-", "_")
+            # Remove language prefix if present (e.g., "de/ruby" -> "ruby")
+            if "/" in clean_preset:
+                clean_preset = clean_preset.split("/")[-1]
+            
+            for f in PRESET_ROOT.rglob("*"):
+                if not f.is_file(): 
+                    continue
                 f_clean = f.stem.lower().replace(" ", "_").replace("-", "_")
                 if clean_preset in f_clean or f_clean in clean_preset:
                     print(f"[debug] Found fuzzy preset match: {f} (matched '{clean_preset}')")
@@ -1066,17 +1078,25 @@ def generate_tts_handler(job):
         language = inp.get("language", "en")
         
         # Voice language parameter - language of the voice sample (for accent control)
-        # CRITICAL: Preset voices are ALWAYS English, so set voice_language = "en" for preset voices
-        # For user voices, try to get from input parameter, then auto-detect from stored metadata,
-        # finally default to target language
+        # For preset voices: auto-detect from folder path (e.g., "de/Ruby.mp3" = German)
+        # For user voices: get from input parameter, then auto-detect from stored metadata,
+        # finally default to English
         voice_language = inp.get("voice_language")
         
         voice_language_from_metadata = False
         
-        # If using a preset voice, preset voices are ALWAYS English
+        # If using a preset voice, extract language from path
         if preset_voice:
-            voice_language = "en"
-            print(f"[tts] Preset voice detected - setting voice_language to 'en' (preset voices are English-only)")
+            # Check if preset uses language-specific folder structure (e.g., "de/Ruby.mp3")
+            if "/" in preset_voice or "\\" in preset_voice:
+                # Extract language code from path (e.g., "de/Ruby.mp3" -> "de")
+                preset_lang = preset_voice.split("/")[0].split("\\")[0]
+                voice_language = preset_lang
+                print(f"[tts] Preset voice language auto-detected from path: '{voice_language}' (from '{preset_voice}')")
+            else:
+                # Fallback: assume English for backward compatibility with flat structure
+                voice_language = "en"
+                print(f"[tts] Preset voice without language folder - defaulting to 'en'")
         elif voice_language is None and user_id and embedding_filename:
             # Auto-detect from stored metadata if not provided (only for user voices)
             stored_language = get_voice_language(user_id, embedding_filename)
@@ -1602,15 +1622,36 @@ def clone_voice_handler(job):
 
 def list_preset_voices_handler(job):
     try:
+        inp = job.get("input", {})
+        language = inp.get("language", "en")  # Default to English if not specified
+        
         voices = []
-        for path in PRESET_ROOT.rglob("*"):
-            if path.suffix.lower() in ['.wav', '.mp3', '.flac', '.m4a']:
-                rel = str(path.relative_to(PRESET_ROOT))
-                voices.append({
-                    "filename": rel,
-                    "name": path.stem.replace("_", " ").title(),
-                })
-        print(f"[presets] Found {len(voices)} voices")
+        # Look for voices in language-specific subfolder first (e.g., /preset_voices/de/)
+        lang_dir = PRESET_ROOT / language
+        
+        if lang_dir.exists() and lang_dir.is_dir():
+            # Use language-specific presets
+            for path in lang_dir.rglob("*"):
+                if path.suffix.lower() in ['.wav', '.mp3', '.flac', '.m4a']:
+                    # Store relative path including language folder (e.g., "de/Ruby.mp3")
+                    rel = str(path.relative_to(PRESET_ROOT))
+                    voices.append({
+                        "filename": rel,
+                        "name": path.stem.replace("_", " ").title(),
+                    })
+            print(f"[presets] Found {len(voices)} voices for language '{language}'")
+        else:
+            # Fallback: if no language folder exists, return all presets (backward compatibility)
+            print(f"[presets] ⚠️ No language-specific folder for '{language}', returning all presets")
+            for path in PRESET_ROOT.rglob("*"):
+                if path.suffix.lower() in ['.wav', '.mp3', '.flac', '.m4a']:
+                    rel = str(path.relative_to(PRESET_ROOT))
+                    voices.append({
+                        "filename": rel,
+                        "name": path.stem.replace("_", " ").title(),
+                    })
+            print(f"[presets] Found {len(voices)} voices (all languages)")
+        
         return {"status": "success", "preset_voices": voices, "count": len(voices)}
     except Exception as e:
         print(f"[error] List presets failed: {e}")
