@@ -524,18 +524,16 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         normalized = normalize_chunk(filtered)
         
         # Energy-based Tail Trimmer: Remove hallucinations at chunk ends
-        # -45dB: Strategic balance between noise removal and speech protection
-        # Cuts out model hiss/artifacts that occur right after the sentence ends
-        tail_threshold = 10 ** (-45 / 20.0)
-        win_len = int(SAMPLE_RATE * 0.03) # 30ms window
+        # -40dB: More aggressive to catch those final "stray" thumps
+        # Uses a slightly longer window (50ms) to ensure it identifies speech energy vs artifacts
+        tail_threshold = 10 ** (-40 / 20.0)
+        win_len = int(SAMPLE_RATE * 0.05) # 50ms window
         
         last_speech_idx = len(normalized)
-        # Scan backwards from the end to find where the speech actually stops
-        for j in range(len(normalized) - win_len, max(0, len(normalized) - int(SAMPLE_RATE * 0.2)), -win_len):
+        # Scan backwards from the end (up to 300ms) to find where the speech actually stops
+        for j in range(len(normalized) - win_len, max(0, len(normalized) - int(SAMPLE_RATE * 0.3)), -win_len):
             win_rms = np.sqrt(np.mean(normalized[j:j+win_len]**2))
             if win_rms > tail_threshold:
-                # Removed 10ms padding to ensure no noise tail remains
-                # We stop exactly where the energy drops below threshold
                 last_speech_idx = j + win_len
                 break
             last_speech_idx = j
@@ -545,7 +543,6 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         for j in range(0, min(len(normalized), int(SAMPLE_RATE * 0.1)), win_len):
             win_rms = np.sqrt(np.mean(normalized[j:j+win_len]**2))
             if win_rms > tail_threshold:
-                # Tightened start idx to eliminate breaths
                 first_speech_idx = j
                 break
             first_speech_idx = j
