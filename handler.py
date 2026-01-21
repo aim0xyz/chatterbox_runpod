@@ -619,17 +619,18 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         
         # Step B: Energy-based Tail Trimmer (CRITICAL)
         # We trim BEFORE normalization so thumps don't squash the speech volume
-        # LOWERED threshold from -42dB to -45dB to catch quieter breathing artifacts
-        tail_threshold = 10 ** (-45 / 20.0)
+        # INCREASED threshold from -45dB to -38dB to more aggressively catch breathing artifacts
+        # Breathing typically ranges from -40dB to -30dB, so -38dB should catch most of it
+        tail_threshold = 10 ** (-38 / 20.0)
         win_len = int(SAMPLE_RATE * 0.04) # 40ms window
         
         # Default boundaries
         last_speech_idx = len(filtered)
         first_speech_idx = 0
         
-        # Scan backwards from the end (up to 300ms) to cut out thumps/hallucinations
-        # REDUCED scan back to prevent cutting off soft word endings
-        max_scan_back = int(SAMPLE_RATE * 0.3)
+        # Scan backwards from the end (up to 500ms) to cut out breathing/hallucinations
+        # INCREASED scan range from 300ms to 500ms to catch breathing further from the end
+        max_scan_back = int(SAMPLE_RATE * 0.5)
         for j in range(len(filtered) - win_len, max(0, len(filtered) - max_scan_back), -win_len//2):
             win_rms = np.sqrt(np.mean(filtered[j:j+win_len]**2))
             if win_rms > tail_threshold:
