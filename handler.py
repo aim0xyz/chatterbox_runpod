@@ -573,7 +573,7 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     import time
     stitch_start = time.time()
     
-    for i, chunk in enumerate(normalized_chunks[1:], 1):
+    for i, chunk in enumerate(processed_chunks[1:], 1):
         prev_text = chunk_texts[i-1].strip()
         
         # Determine specific pause based on punctuation
@@ -612,11 +612,11 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     # The crossfading should handle most artifacts, so this is only needed if issues persist
     # Uncomment the code below if you still hear artifacts after crossfading:
     #
-    # if len(result) > 200 and len(normalized_chunks) > 1:
+    # if len(result) > 200 and len(processed_chunks) > 1:
     #     transition_window = int(SAMPLE_RATE * 0.05)  # 50ms window
     #     smoothed = result.copy()
-    #     current_pos = len(normalized_chunks[0])
-    #     for i in range(1, len(normalized_chunks)):
+    #     current_pos = len(processed_chunks[0])
+    #     for i in range(1, len(processed_chunks)):
     #         start_idx = max(0, current_pos - transition_window)
     #         end_idx = min(len(smoothed), current_pos + transition_window)
     #         if end_idx > start_idx + 10:
@@ -624,7 +624,7 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     #             window = 3
     #             for j in range(start_idx + window, end_idx - window):
     #                 smoothed[j] = np.mean(result[j-window:j+window+1])
-    #         current_pos += len(normalized_chunks[i]) + pause_samples
+    #         current_pos += len(processed_chunks[i]) + pause_samples
     #     result = smoothed.astype(np.float32)
     
     final_rms = float(np.sqrt(np.mean(result ** 2))) if len(result) > 0 else 0.0
