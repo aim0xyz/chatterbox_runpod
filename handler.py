@@ -162,6 +162,70 @@ def clean_text(text):
         text = text.replace(old, new)
     return re.sub(r'\s+', ' ', text).strip()
 
+def preprocess_german_text(text):
+    """
+    Fix common German pronunciation issues for TTS.
+    - Enforces 'st' -> 'scht' and 'sp' -> 'schp' pronunciation.
+    - Handles compound words via dictionary replacements.
+    """
+    if not text:
+        return text
+        
+    # 1. Dictionary of specific compound word fixes
+    # Add problematic words here as they are discovered
+    replacements = {
+        "seestern": "seeschtern",
+        "stein": "schtein",
+        "spiel": "schpiel",
+        "stern": "schtern",
+        "stadt": "schtadt",
+        "sport": "schport",
+        "spaß": "schpaß",
+        "still": "schtill",
+        "stark": "schtark",
+        "strom": "schtrom",
+        "strand": "schtrand",
+        "stoff": "schtoff",
+        "stufe": "schtufe",
+        "suppe": "suppe", # Protect simple s words
+    }
+    
+    # Process text to apply replacements (case-insensitive key matching)
+    words = text.split()
+    processed_words = []
+    
+    for word in words:
+        # Clean punctuation
+        clean_word = re.sub(r'[^\wäöüß]', '', word.lower())
+        
+        # Check dictionary
+        if clean_word in replacements:
+            # Match original case (simple heuristic)
+            replacement = replacements[clean_word]
+            if word[0].isupper():
+                replacement = replacement.capitalize()
+            # Restore punctuation
+            if not word[-1].isalnum():
+                replacement += word[-1]
+            processed_words.append(replacement)
+            continue
+            
+        # 2. General Rule: 'st' at start of word -> 'scht'
+        if word.lower().startswith("st"):
+             replacement = "sch" + word[1:] # Replace 's' with 'sch', keep 't'
+             processed_words.append(replacement)
+             continue
+             
+        # 3. General Rule: 'sp' at start of word -> 'schp'
+        if word.lower().startswith("sp"):
+             replacement = "sch" + word[1:] # Replace 's' with 'sch', keep 'p'
+             processed_words.append(replacement)
+             continue
+             
+        processed_words.append(word)
+        
+    return " ".join(processed_words)
+
 def split_sentences(text):
     if not text:
         return []
@@ -526,8 +590,8 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     for i, chunk in enumerate(audio_list):
         # Step A: High-pass filter to remove low-frequency rumbles first
         # Doing this before trimming helps the RMS check ignore sub-bass noise
-        # BACK to 100Hz - 135Hz was cutting fundamentals of male voices causing robotic artifacts
-        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
+        # 80Hz is safer for deep male voices but still kills wind rumble
+        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=80)
         
         # Step B: Energy-based Tail Trimmer (CRITICAL)
         # We trim BEFORE normalization so thumps don't squash the speech volume
@@ -564,7 +628,7 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         normalized = normalize_chunk(trimmed)
         
         # Step D: Apply subtle fades for seamless stitching
-        faded = apply_fade(normalized, fade_ms=50) # Reduced from 80ms for cleaner semantics
+        faded = apply_fade(normalized, fade_ms=30) # Reduced from 50ms to prevent wind-like smearing
         processed_chunks.append(faded)
     
     if len(processed_chunks) == 1:
@@ -600,7 +664,7 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         # Crossfade into next chunk for seamless transition
         # LONGER crossfade to better blend breathing artifacts
         if len(result) > 0 and len(chunk) > 0:
-            result = crossfade(result, chunk, crossfade_ms=80)  # Increased from 40ms to 80ms
+            result = crossfade(result, chunk, crossfade_ms=30)  # Reduced from 80ms to 30ms
         else:
             result = np.concatenate([result, chunk])
     
@@ -1054,18 +1118,18 @@ def generate_tts_handler(job):
         # Balances voice cloning accuracy with clean, artifact-free audio generation
         
         # Exaggeration: Controls prosody expressiveness
-        # 0.45 = balanced (was 0.35)
+        # 0.45 = balanced
         # Higher helps articulation, preventing "mumbling/monster" sounds
         exaggeration = float(inp.get("exaggeration", 0.45))
         
         # Temperature: Controls generation randomness/stability
-        # 0.65 = Standard stability (was 0.55)
-        # Too low temp causes "monster" artifacts (mode collapse)
-        temperature = float(inp.get("temperature", 0.65))
+        # 0.7 = Higher stability against mode collapse (was 0.65)
+        # Higher temp helps the model "escape" the robotic/monster state
+        temperature = float(inp.get("temperature", 0.7))
         
-        # CFG Weight: 0.55 = Natural voice influence (was 0.7)
-        # Lowering this prevents the model from "breaking" under pressure
-        cfg_weight = float(inp.get("cfg_weight", 0.55))
+        # CFG Weight: 0.5 = Natural flow (was 0.55)
+        # Lowering this further reduces the "forcing" that causes glitches
+        cfg_weight = float(inp.get("cfg_weight", 0.5))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
@@ -1089,6 +1153,15 @@ def generate_tts_handler(job):
         print(f"[tts] Voice: {voice_path}")
 
         text = clean_text(text)
+        
+        # Apply language-specific preprocessing
+        if language == "de":
+            print(f"[tts] Applying German phonetic fixes to text...")
+            original_text = text
+            text = preprocess_german_text(text)
+            if original_text != text:
+                print(f"[tts] Modified text for pronunciation: {original_text[:30]}... -> {text[:30]}...")
+        
         sentences = split_sentences(text)
         chunks = chunk_sentences(sentences, max_chars=max_chunk_chars)
 
