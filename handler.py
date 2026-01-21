@@ -1085,10 +1085,14 @@ def generate_tts_handler(job):
                 voice_language_from_metadata = True
                 print(f"[tts] Auto-detected voice language from metadata: {voice_language}")
         
-        # Default to target language if still not found (only for user voices without metadata)
+        # Default to English if still not found (safest assumption for user voices)
+        # IMPORTANT: Defaulting to target language causes cross-lingual accent issues
+        # because the system thinks the voice is already in the target language
+        # and skips accent control, resulting in English accent in German text, etc.
+        # Most user voice samples are in English, so this is the safest default.
         if voice_language is None:
-            voice_language = language
-            print(f"[tts] Voice language not specified, defaulting to target language: {language}")
+            voice_language = 'en'
+            print(f"[tts] Voice language not specified, defaulting to English ('en') for cross-lingual compatibility")
         
         # Determine if voice language was defaulted (not explicitly known)
         voice_language_was_auto_detected = (
