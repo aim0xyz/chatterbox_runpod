@@ -1088,10 +1088,17 @@ def generate_tts_handler(job):
             # For preset voices (always English initially), use target language accent if languages differ
             preserve_voice_accent = languages_match
         else:
-            # Users voices: ALWAYS preserve voice accent by default (even across languages)
-            # This prevents your English voice from sounding French when reading French text
-            # Only switch if voice_language was completely unknown (no metadata)
-            preserve_voice_accent = True
+            # Users voices:
+            # If languages match (en->en), preserve accent (natural).
+            # If languages differ (en->de), DO NOT preserve accent by default, otherwise you get English accent in German.
+            # This fixes the "inconsistent accent" issue.
+            if languages_match:
+                preserve_voice_accent = True
+            else:
+                preserve_voice_accent = False
+                print(f"[tts] Cross-lingual user voice detected ({voice_language} -> {language}): Prioritizing target accent")
+            
+            # Legacy override: if voice_language was unknown, rely on target language
             if voice_language_was_auto_detected:
                 preserve_voice_accent = False
         
@@ -1101,13 +1108,19 @@ def generate_tts_handler(job):
         # to ensure target language accent is used (e.g., German accent for German text, even with English voice)
         if preserve_voice_accent:
             accent_control = 0.0
-            print(f"[tts] ✅ Preserving voice accent (explicitly requested or languages match with explicit voice_language)")
+            print(f"[tts] ✅ Preserving voice accent (explicitly requested or languages match)")
         else:
-            # Force maximum accent control when languages differ OR when voice_language was auto-detected
+            # Force maximum accent control when languages differ to kill the source accent
             # This ensures target language accent is always used
-            accent_control = float(inp.get("accent_control", 1.0))
+            # If user didn't specify accent_control, default to 1.0 (MAX) for cross-lingual cases
+            user_accent_control = inp.get("accent_control")
+            if user_accent_control is not None:
+                accent_control = float(user_accent_control)
+            else:
+                accent_control = 1.0 # Default to MAX for cross-lingual to ensure correct pronunciation
+                
             if not languages_match or voice_language_was_auto_detected:
-                print(f"[tts] ⚠️  Using target language accent ({language}) - accent_control={accent_control:.2f} (MAXIMUM)")
+                print(f"[tts] ⚠️  Using target language accent ({language}) - accent_control={accent_control:.2f} (MAXIMUM recommended)")
                 print(f"[tts]   Reason: {'languages differ' if not languages_match else 'voice_language was auto-detected'}")
         
         # Volume normalization parameter - default to True for backward compatibility
