@@ -560,7 +560,8 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         
         # Step C: Apply breath reduction BEFORE normalization to remove trailing artifacts
         # This catches breathing sounds that might be right at the edge of detection
-        breath_reduced = reduce_breathing_artifacts(trimmed, breath_threshold_db=-38, reduction_factor=0.15)
+        # INCREASED threshold from -38dB to -36dB to avoid removing sibilants (s, sh sounds)
+        breath_reduced = reduce_breathing_artifacts(trimmed, breath_threshold_db=-36, reduction_factor=0.18)
         
         # Step D: Normalize the trimmed speech
         # Now that thumps and initial breaths are gone, the normalization will be much more accurate
@@ -1260,25 +1261,27 @@ def generate_tts_handler(job):
             # print(f"[tts]   High-pass filter (100Hz) to remove low-frequency artifacts...")
             # final_wav = apply_high_pass_filter(final_wav, cutoff_hz=100)
             
-            # Step 4.5: Apply high-shelf filter to gently reduce high-frequency noise
-            # Reduces scratchy/sandy artifacts while preserving speech clarity
-            print(f"[tts]   High-shelf filter to reduce high-frequency noise...")
-            final_wav = apply_high_shelf_filter(final_wav, cutoff_hz=10000, gain_db=-2)
+            # Step 4.5: High-shelf filter REMOVED to prevent lisping/muffled consonants
+            # The filter was reducing high-frequency clarity of sibilants (s, sh, ch)
+            # Spectral gating below handles high-frequency noise more selectively
+            # print(f"[tts]   High-shelf filter to reduce high-frequency noise...")
+            # final_wav = apply_high_shelf_filter(final_wav, cutoff_hz=10000, gain_db=-2)
             
             # Step 5: Low-pass filter removed - was making audio sound too dimmed/muffled
             # High-shelf filter above is gentler and more effective
             
             # Step 6: Apply spectral gating to remove background noise and hiss
-            # -60dB threshold: Highly aggressive to eliminate "shhhh" noise/hissing
-            # This ensures that quiet sections and sentence tails are perfectly silent
+            # REDUCED from -60dB to -50dB to be less aggressive and preserve sibilants
+            # Too aggressive gating can reduce the "s" and "sh" sounds
             print(f"[tts]   Spectral gating to remove background noise...")
-            final_wav = apply_spectral_gating(final_wav, threshold_db=-60)
+            final_wav = apply_spectral_gating(final_wav, threshold_db=-50)
             
             # Step 6.5: Reduce harsh breathing artifacts (second pass after stitching)
-            # Enhanced with ZCR detection and even more aggressive reduction for cleaner pauses
+            # INCREASED threshold from -32dB to -30dB to be more selective
+            # This avoids accidentally reducing sibilant consonants that have similar characteristics
             # This is the second pass - first pass was in chunk processing before normalization
             print(f"[tts]   Reducing breathing artifacts (final pass)...")
-            final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-32, reduction_factor=0.12)
+            final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-30, reduction_factor=0.15)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
