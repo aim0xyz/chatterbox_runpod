@@ -103,18 +103,41 @@ def get_user_dir(user_id):
     return d
 
 def find_voice(user_id=None, filename=None, preset=None):
-    if preset:
-        for ext in ['', '.wav', '.mp3', '.flac']:
-            p = PRESET_ROOT / f"{preset}{ext}"
+    try:
+        print(f"[debug] find_voice called with: preset='{preset}', user_id='{user_id}', filename='{filename}'")
+        
+        if preset:
+            # 1. Direct match
+            for ext in ['', '.wav', '.mp3', '.flac']:
+                p = PRESET_ROOT / f"{preset}{ext}"
+                if p.exists():
+                    print(f"[debug] Found exact preset match: {p}")
+                    return p
+            
+            # 2. Case-insensitive / normalized match
+            # content matching "santa claus" -> "santa_claus" or "SantaClaus"
+            clean_preset = str(preset).lower().replace(" ", "_").replace("-", "_")
+            
+            for f in PRESET_ROOT.iterdir():
+                if not f.is_file(): continue
+                f_clean = f.stem.lower().replace(" ", "_").replace("-", "_")
+                if clean_preset in f_clean or f_clean in clean_preset:
+                    print(f"[debug] Found fuzzy preset match: {f} (matched '{clean_preset}')")
+                    return f
+                    
+        if user_id and filename:
+            p = get_user_dir(user_id) / filename
             if p.exists():
+                print(f"[debug] Found user voice: {p}")
                 return p
-        for f in PRESET_ROOT.rglob(f"*{preset}*"):
-            if f.is_file():
-                return f
-    if user_id and filename:
-        p = get_user_dir(user_id) / filename
-        if p.exists():
-            return p
+            else:
+                print(f"[debug] User voice file not found at: {p}")
+                
+    except Exception as e:
+        print(f"[error] find_voice failed: {e}")
+        traceback.print_exc()
+        
+    print(f"[debug] No voice found for preset='{preset}' or user='{user_id}'/'{filename}'")
     return None
 
 def get_voice_language(user_id=None, filename=None):
@@ -1160,7 +1183,9 @@ def generate_tts_handler(job):
             print(f"[tts] Accent control: {accent_control:.2f} (will prioritize {language} accent for consistency)")
 
         voice_path = find_voice(user_id, embedding_filename, preset_voice)
+        voice_path = find_voice(user_id, embedding_filename, preset_voice)
         if not voice_path:
+            print(f"[error] Voice not found. Aborting generation.")
             return {"error": "Voice file not found"}
 
         print(f"[tts] Voice: {voice_path}")
