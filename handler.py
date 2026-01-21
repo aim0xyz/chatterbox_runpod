@@ -526,8 +526,8 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     for i, chunk in enumerate(audio_list):
         # Step A: High-pass filter to remove low-frequency rumbles first
         # Doing this before trimming helps the RMS check ignore sub-bass noise
-        # INCREASED to 120Hz to aggressively target "wind/rumble" noise
-        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=120)
+        # INCREASED to 135Hz to essentially eliminate all potential wind noise
+        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=135)
         
         # Step B: Energy-based Tail Trimmer (CRITICAL)
         # We trim BEFORE normalization so thumps don't squash the speech volume
@@ -1054,18 +1054,18 @@ def generate_tts_handler(job):
         # Balances voice cloning accuracy with clean, artifact-free audio generation
         
         # Exaggeration: Controls prosody expressiveness
-        # 0.5 = neutral, natural storytelling (was 0.6 - too dramatic)
-        # Lower = more natural pacing, fewer artifacts in emotional peaks
-        exaggeration = float(inp.get("exaggeration", 0.5))
+        # 0.35 = calm, very stable storytelling (was 0.5)
+        # Reducing this is the #1 way to kill breathiness/noise artifacts
+        exaggeration = float(inp.get("exaggeration", 0.35))
         
         # Temperature: Controls generation randomness/stability
-        # 0.6 = Stable middle ground (was 0.55 - too low can cause noise/skipping)
-        # Higher than before to prevent "mode collapse" where the model skips sentences
-        temperature = float(inp.get("temperature", 0.6))
+        # 0.55 = Very stable (was 0.6)
+        # Lower temp = less chance of random noise bursts or hallucinations
+        temperature = float(inp.get("temperature", 0.55))
         
-        # CFG Weight: 0.6 = Slightly more voice influence (was 0.5)
-        # Helps the model stay "focused" on the voice to avoid generating noise
-        cfg_weight = float(inp.get("cfg_weight", 0.6))
+        # CFG Weight: 0.7 = Stronger voice influence (was 0.6)
+        # Higher values force the model to stick to the prompt, reducing "wandering" into noise
+        cfg_weight = float(inp.get("cfg_weight", 0.7))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
