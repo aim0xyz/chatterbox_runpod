@@ -427,16 +427,16 @@ def soft_limiter(wav, threshold=0.88, ratio=4.0):
     
     return result.astype(np.float32)
 
-def reduce_breathing_artifacts(wav, breath_threshold_db=-30, reduction_factor=0.3):
+def reduce_breathing_artifacts(wav, breath_threshold_db=-35, reduction_factor=0.2):
     """
-    Detect and reduce harsh breathing sounds (inhale/exhale artifacts).
-    Especially effective for reducing breaths at chunk transitions and in pauses.
+    Enhanced detection and reduction of harsh breathing sounds (inhale/exhale artifacts).
+    Uses Zero-Crossing Rate (ZCR) and spectral energy balance for better accuracy.
     """
     if len(wav) < 1000:
         return wav
     
     # Window size for breath detection (typical breath is 100-300ms)
-    window_size = int(SAMPLE_RATE * 0.15)  # 150ms windows
+    window_size = int(SAMPLE_RATE * 0.10)  # 100ms windows
     hop_size = window_size // 2
     
     num_windows = (len(wav) - window_size) // hop_size
@@ -450,34 +450,39 @@ def reduce_breathing_artifacts(wav, breath_threshold_db=-30, reduction_factor=0.
         start_idx = i * hop_size
         end_idx = start_idx + window_size
         
-        if end_idx > len(wav):
-            break
-        
         window = wav[start_idx:end_idx]
-        
-        # Calculate spectral characteristics
-        # Breaths have specific frequency content (2-6kHz range)
-        # and lower RMS than speech
         rms = float(np.sqrt(np.mean(window ** 2)))
         
-        # Check if this window contains potential breathing
-        # Breaths are: quiet but with high-frequency content
+        # Breaths are quiet (low RMS) but have high zero-crossing rate (hiss-like)
         if rms < threshold_linear and rms > 1e-6:
-            # Calculate high-frequency content
-            diff = np.abs(np.diff(window))
-            high_freq_energy = float(np.mean(diff))
+            # Calculate Zero-Crossing Rate (ZCR)
+            zcr = np.mean(np.abs(np.diff(np.sign(window)))) / 2
             
-            # If high-frequency energy is present but RMS is low = likely breath
-            if high_freq_energy > rms * 0.5:
-                # Reduce this section (likely a breath)
-                # Use smooth reduction to avoid new artifacts
-                reduction_envelope = np.linspace(1.0, reduction_factor, window_size // 2)
-                reduction_envelope = np.concatenate([
-                    reduction_envelope,
-                    np.linspace(reduction_factor, 1.0, window_size - len(reduction_envelope))
-                ])
+            # Breaths typically have ZCR between 0.05 and 0.4
+            # Speech usually has lower ZCR (vowels) or much higher/different patterns
+            if zcr > 0.08:
+                # Calculate high-frequency energy ratio
+                diff = np.abs(np.diff(window))
+                hf_energy = float(np.mean(diff))
                 
-                result[start_idx:end_idx] *= reduction_envelope
+                # If high-frequency energy is dominant, it's a breath or hiss
+                if hf_energy > rms * 0.6:
+                    # Apply smooth reduction envelope
+                    reduction_envelope = np.linspace(1.0, reduction_factor, window_size // 4)
+                    middle = np.ones(window_size - (window_size // 2)) * reduction_factor
+                    reduction_envelope = np.concatenate([
+                        reduction_envelope,
+                        middle,
+                        np.linspace(reduction_factor, 1.0, window_size // 4)
+                    ])
+                    
+                    # Ensure same length
+                    if len(reduction_envelope) > window_size:
+                        reduction_envelope = reduction_envelope[:window_size]
+                    elif len(reduction_envelope) < window_size:
+                        reduction_envelope = np.pad(reduction_envelope, (0, window_size - len(reduction_envelope)), 'edge')
+                    
+                    result[start_idx:end_idx] *= reduction_envelope
     
     return result.astype(np.float32)
 
@@ -516,48 +521,54 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     if not audio_list:
         return np.array([], dtype=np.float32)
     
-    # Normalize each chunk individually for consistent volume
-    normalized_chunks = []
+    # Process and normalize each chunk individually for consistent volume
+    processed_chunks = []
     for i, chunk in enumerate(audio_list):
-        # Increased high-pass filter from 60Hz to 100Hz to eliminate "thumps" and "falling" noises
+        # Step A: High-pass filter to remove low-frequency rumbles first
+        # Doing this before trimming helps the RMS check ignore sub-bass noise
         filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
-        normalized = normalize_chunk(filtered)
         
-        # Energy-based Tail Trimmer: Remove hallucinations at chunk ends
-        # -40dB: More aggressive to catch those final "stray" thumps
-        # Uses a slightly longer window (50ms) to ensure it identifies speech energy vs artifacts
-        tail_threshold = 10 ** (-40 / 20.0)
-        win_len = int(SAMPLE_RATE * 0.05) # 50ms window
+        # Step B: Energy-based Tail Trimmer (CRITICAL)
+        # We trim BEFORE normalization so thumps don't squash the speech volume
+        tail_threshold = 10 ** (-42 / 20.0)
+        win_len = int(SAMPLE_RATE * 0.04) # 40ms window
         
-        last_speech_idx = len(normalized)
-        # Scan backwards from the end (up to 300ms) to find where the speech actually stops
-        for j in range(len(normalized) - win_len, max(0, len(normalized) - int(SAMPLE_RATE * 0.3)), -win_len):
-            win_rms = np.sqrt(np.mean(normalized[j:j+win_len]**2))
+        # Default boundaries
+        last_speech_idx = len(filtered)
+        first_speech_idx = 0
+        
+        # Scan backwards from the end (up to 400ms) to cut out thumps/hallucinations
+        max_scan_back = int(SAMPLE_RATE * 0.4)
+        for j in range(len(filtered) - win_len, max(0, len(filtered) - max_scan_back), -win_len//2):
+            win_rms = np.sqrt(np.mean(filtered[j:j+win_len]**2))
             if win_rms > tail_threshold:
                 last_speech_idx = j + win_len
                 break
             last_speech_idx = j
             
-        # Also clean up the start of the chunk (inhale breaths)
-        first_speech_idx = 0
-        for j in range(0, min(len(normalized), int(SAMPLE_RATE * 0.1)), win_len):
-            win_rms = np.sqrt(np.mean(normalized[j:j+win_len]**2))
+        # Also clean up the start for inhale/click artifacts
+        for j in range(0, min(len(filtered), int(SAMPLE_RATE * 0.15)), win_len//2):
+            win_rms = np.sqrt(np.mean(filtered[j:j+win_len]**2))
             if win_rms > tail_threshold:
-                first_speech_idx = j
+                first_speech_idx = max(0, j - win_len)
                 break
             first_speech_idx = j
             
-        normalized = normalized[first_speech_idx:last_speech_idx]
+        trimmed = filtered[first_speech_idx:last_speech_idx]
         
-        # Apply longer fades (100ms) to each chunk for a perfect transition to silence
-        faded = apply_fade(normalized, fade_ms=100)
-        normalized_chunks.append(faded)
+        # Step C: Normalize the trimmed speech
+        # Now that thumps are gone, the normalization will be much more accurate
+        normalized = normalize_chunk(trimmed)
+        
+        # Step D: Apply subtle fades for seamless stitching
+        faded = apply_fade(normalized, fade_ms=80)
+        processed_chunks.append(faded)
     
-    if len(normalized_chunks) == 1:
-        return normalized_chunks[0]
+    if len(processed_chunks) == 1:
+        return processed_chunks[0]
     
     # Stitch with dynamic storytelling pauses
-    result = normalized_chunks[0]
+    result = processed_chunks[0]
     
     import time
     stitch_start = time.time()
@@ -1258,9 +1269,9 @@ def generate_tts_handler(job):
             final_wav = apply_spectral_gating(final_wav, threshold_db=-60)
             
             # Step 6.5: Reduce harsh breathing artifacts
-            # Targets harsh inhale/exhale sounds at chunk transitions and in quiet sections
+            # Enhanced with ZCR detection and more aggressive reduction for cleaner pauses
             print(f"[tts]   Reducing breathing artifacts...")
-            final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-30, reduction_factor=0.3)
+            final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-35, reduction_factor=0.2)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
