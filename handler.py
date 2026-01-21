@@ -538,9 +538,9 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         last_speech_idx = len(filtered)
         first_speech_idx = 0
         
-        # Scan backwards from the end (up to 600ms) to cut out thumps/hallucinations/breathing
-        # EXTENDED from 400ms to 600ms to catch longer breathing artifacts and clicks
-        max_scan_back = int(SAMPLE_RATE * 0.6)
+        # Scan backwards from the end (up to 300ms) to cut out thumps/hallucinations
+        # REDUCED scan back to prevent cutting off soft word endings
+        max_scan_back = int(SAMPLE_RATE * 0.3)
         for j in range(len(filtered) - win_len, max(0, len(filtered) - max_scan_back), -win_len//2):
             win_rms = np.sqrt(np.mean(filtered[j:j+win_len]**2))
             if win_rms > tail_threshold:
@@ -558,17 +558,12 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
             
         trimmed = filtered[first_speech_idx:last_speech_idx]
         
-        # Step C: Apply breath reduction BEFORE normalization to remove trailing artifacts
-        # This catches breathing sounds that might be right at the edge of detection
-        # INCREASED threshold from -38dB to -36dB to avoid removing sibilants (s, sh sounds)
-        breath_reduced = reduce_breathing_artifacts(trimmed, breath_threshold_db=-36, reduction_factor=0.18)
+        # Step C: Normalize the trimmed speech
+        # Now that thumps are gone, the normalization will be much more accurate
+        normalized = normalize_chunk(trimmed)
         
-        # Step D: Normalize the trimmed speech
-        # Now that thumps and initial breaths are gone, the normalization will be much more accurate
-        normalized = normalize_chunk(breath_reduced)
-        
-        # Step E: Apply subtle fades for seamless stitching
-        faded = apply_fade(normalized, fade_ms=80)
+        # Step D: Apply subtle fades for seamless stitching
+        faded = apply_fade(normalized, fade_ms=50) # Reduced from 80ms for cleaner semantics
         processed_chunks.append(faded)
     
     if len(processed_chunks) == 1:
@@ -1270,18 +1265,15 @@ def generate_tts_handler(job):
             # Step 5: Low-pass filter removed - was making audio sound too dimmed/muffled
             # High-shelf filter above is gentler and more effective
             
-            # Step 6: Apply spectral gating to remove background noise and hiss
-            # REDUCED from -60dB to -50dB to be less aggressive and preserve sibilants
-            # Too aggressive gating can reduce the "s" and "sh" sounds
-            print(f"[tts]   Spectral gating to remove background noise...")
-            final_wav = apply_spectral_gating(final_wav, threshold_db=-50)
+            # Step 6: Spectral gating REMOVED
+            # It was causing artifacts and lisping by removing high frequency content
+            # print(f"[tts]   Spectral gating to remove background noise...")
+            # final_wav = apply_spectral_gating(final_wav, threshold_db=-50)
             
-            # Step 6.5: Reduce harsh breathing artifacts (second pass after stitching)
-            # INCREASED threshold from -32dB to -30dB to be more selective
-            # This avoids accidentally reducing sibilant consonants that have similar characteristics
-            # This is the second pass - first pass was in chunk processing before normalization
-            print(f"[tts]   Reducing breathing artifacts (final pass)...")
-            final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-30, reduction_factor=0.15)
+            # Step 6.5: Breath reduction REMOVED
+            # It was incorrectly identifying sibilants as breathing noise
+            # print(f"[tts]   Reducing breathing artifacts (final pass)...")
+            # final_wav = reduce_breathing_artifacts(final_wav, breath_threshold_db=-30, reduction_factor=0.15)
             
             # Step 7: Apply smooth fade in/out to prevent clicks at start/end
             print(f"[tts]   Applying smooth fade in/out...")
