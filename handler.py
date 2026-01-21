@@ -614,7 +614,8 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         # Step A: High-pass filter to remove low-frequency rumbles first
         # Doing this before trimming helps the RMS check ignore sub-bass noise
         # 80Hz is safer for deep male voices but still kills wind rumble
-        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=80)
+        # Increased to 100Hz to be safer against pops/thumps
+        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=100)
         
         # Step B: Energy-based Tail Trimmer (CRITICAL)
         # We trim BEFORE normalization so thumps don't squash the speech volume
@@ -670,11 +671,11 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         # REDUCED from previous values to minimize breathing artifact zones
         current_pause = pause_ms
         if prev_text.endswith(('.', '!', '?')):
-            current_pause = 400  # Reduced from 650ms - shorter pause = less breath time
+            current_pause = 500  # Tuned for natural flow (was 400)
         elif prev_text.endswith((',', ';', ':')):
-            current_pause = 200  # Reduced from 300ms
+            current_pause = 250  # Tuned (was 200)
         elif '\n' in prev_text:
-            current_pause = 550  # Reduced from 900ms
+            current_pause = 700  # Tuned (was 550)
         else:
             current_pause = 100  # Reduced from 150ms
             
@@ -687,7 +688,7 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         # Crossfade into next chunk for seamless transition
         # LONGER crossfade to better blend breathing artifacts
         if len(result) > 0 and len(chunk) > 0:
-            result = crossfade(result, chunk, crossfade_ms=30)  # Reduced from 80ms to 30ms
+            result = crossfade(result, chunk, crossfade_ms=60)  # Increased to 60ms for smoother blending
         else:
             result = np.concatenate([result, chunk])
     
@@ -1156,12 +1157,13 @@ def generate_tts_handler(job):
         # Exaggeration: Controls prosody expressiveness
         # 0.45 = balanced
         # Higher helps articulation, preventing "mumbling/monster" sounds
-        exaggeration = float(inp.get("exaggeration", 0.45))
+        # Reduced to 0.5 per recommendation for better stability
+        exaggeration = float(inp.get("exaggeration", 0.5))
         
         # Temperature: Controls generation randomness/stability
         # 0.7 = Higher stability against mode collapse (was 0.65)
-        # Higher temp helps the model "escape" the robotic/monster state
-        temperature = float(inp.get("temperature", 0.7))
+        # REDUCED to 0.55 to prevent "weird sounds" and hallucinations between sentences
+        temperature = float(inp.get("temperature", 0.55))
         
         # CFG Weight: 0.5 = Natural flow (was 0.55)
         # Lowering this further reduces the "forcing" that causes glitches
