@@ -431,6 +431,24 @@ def detect_and_remove_clicks(wav, threshold=0.3):
     
     return cleaned
 
+def trim_trailing_silence(wav, threshold_db=-40, min_keep_samples=1000):
+    """Aggressively trim silence and low-level noise from the END of an audio chunk."""
+    if len(wav) < min_keep_samples:
+        return wav
+        
+    threshold_linear = 10 ** (threshold_db / 20.0)
+    window_size = int(SAMPLE_RATE * 0.05)  # 50ms window
+    
+    # Iterate backwards from end
+    for i in range(len(wav) - window_size, 0, -window_size):
+        chunk_rms = np.sqrt(np.mean(wav[i:i+window_size]**2))
+        if chunk_rms > threshold_linear:
+            # Found end of speech, keep up to this point + small buffer
+            cutoff = min(len(wav), i + window_size * 2) 
+            return wav[:cutoff]
+            
+    return wav
+
 def crossfade(audio1, audio2, crossfade_ms=50):
     """Smoothly crossfade between two audio segments with longer overlap."""
     crossfade_samples = int(SAMPLE_RATE * crossfade_ms / 1000)
@@ -469,7 +487,11 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     # Normalize each chunk individually for consistent volume
     normalized_chunks = []
     for i, chunk in enumerate(audio_list):
-        filtered = apply_high_pass_filter(chunk.copy(), cutoff_hz=60)
+        # 1. Trim trailing silence/noise aggressively (-40dB)
+        # This removes the "weird 2-3s noise" at end of generations
+        trimmed = trim_trailing_silence(chunk.copy(), threshold_db=-40)
+        
+        filtered = apply_high_pass_filter(trimmed, cutoff_hz=60)
         normalized = normalize_chunk(filtered)
         # Apply gentle fades to each chunk
         faded = apply_fade(normalized, fade_ms=50)
@@ -595,6 +617,10 @@ def apply_resemble_enhance(wav, sample_rate=24000):
             print(f"[enhance] Using {device} for enhancement")
         
         wav_tensor = wav_tensor.to(device)
+        
+        # Ensure tensor is 1D for inference (resemble-enhance expects [samples])
+        if wav_tensor.dim() == 2 and wav_tensor.shape[0] == 1:
+            wav_tensor = wav_tensor.squeeze(0)
         
         # First pass: denoise (removes background noise and breathing)
         denoised = denoise(wav_tensor, 44100, device=device)
