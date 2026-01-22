@@ -623,13 +623,25 @@ def apply_resemble_enhance(wav, sample_rate=24000):
             wav_tensor = wav_tensor.squeeze(0)
         
         # First pass: denoise (removes background noise and breathing)
-        denoised = denoise(wav_tensor, 44100, device=device)
-        
+        # Returns tuple (wav, sr)
+        denoised_out = denoise(wav_tensor, 44100, device=device)
+        if isinstance(denoised_out, tuple):
+            denoised_wav = denoised_out[0]
+        else:
+            denoised_wav = denoised_out
+            
         # Second pass: enhance (improves clarity, removes remaining artifacts)
-        enhanced = enhance(denoised, 44100, device=device)
+        # Returns tuple (wav, sr)
+        enhanced_out = enhance(denoised_wav, 44100, device=device)
+        if isinstance(enhanced_out, tuple):
+            enhanced_wav_tensor = enhanced_out[0]
+        else:
+            enhanced_wav_tensor = enhanced_out
         
         # Convert back to numpy
-        enhanced_wav = enhanced.squeeze(0).cpu().numpy()
+        enhanced_wav = enhanced_wav_tensor.cpu().numpy()
+        if len(enhanced_wav.shape) > 1:
+            enhanced_wav = enhanced_wav.squeeze()
         
         # Resample back to original sample rate if needed
         if sample_rate != 44100:
