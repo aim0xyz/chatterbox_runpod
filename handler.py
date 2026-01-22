@@ -604,10 +604,9 @@ def apply_resemble_enhance(wav, sample_rate=24000):
         # denoise: removes background noise
         # enhance: improves clarity and removes artifacts
         
-        # OPTIMIZATION: Use CPU for enhancement to save GPU for TTS generation
-        # Enhancement is less GPU-intensive than TTS, so CPU works well
-        # This frees up GPU for concurrent TTS jobs
-        use_cpu_for_enhance = True  # Default: use CPU to save GPU resources
+        # OPTIMIZATION: Use GPU for enhancement if available
+        # On Serverless, speed is key. Using GPU is much faster than CPU for this task.
+        use_cpu_for_enhance = False
         
         if use_cpu_for_enhance:
             device = torch.device("cpu")
