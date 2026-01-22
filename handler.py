@@ -615,7 +615,10 @@ def apply_resemble_enhance(wav, sample_rate=24000):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f"[enhance] Using {device} for enhancement")
         
-        wav_tensor = wav_tensor.to(device)
+        # wav_tensor is initially on CPU (from numpy)
+        # We do NOT move it to GPU here explicitly. 
+        # The denoise/enhance functions inside resemble-enhance handle device transfer internally
+        # which avoids "tensor on cuda:0 vs cpu" mismatch errors during internal scalar operations.
         
         # Ensure tensor is 1D for inference (resemble-enhance expects [samples])
         if wav_tensor.dim() == 2 and wav_tensor.shape[0] == 1:
@@ -628,6 +631,10 @@ def apply_resemble_enhance(wav, sample_rate=24000):
             denoised_wav = denoised_out[0]
         else:
             denoised_wav = denoised_out
+            
+        # SAFETY: Move intermediate result back to CPU to avoid device mismatch in next step
+        # The enhance() function might expect CPU input or handle moving it itself
+        denoised_wav = denoised_wav.cpu()
             
         # Second pass: enhance (improves clarity, removes remaining artifacts)
         # Returns tuple (wav, sr)
@@ -1220,48 +1227,78 @@ def generate_tts_handler(job):
             chunk_start = time.time()
             print(f"[tts] Generating chunk {i+1}/{len(chunks)}: {chunk_text[:50]}...")
             try:
-                # Use consistent seed (set before loop) for all chunks to ensure accent consistency
-                # Re-set seed before each chunk to ensure deterministic generation
-                # CRITICAL: Always reset the seed to the EXACT SAME value for EVERY chunk
-                torch.manual_seed(consistent_seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(consistent_seed)
+                # Attempt generation with retries for stability
+                max_retries = 3
+                chunk_audio = None
                 
-                # Restore RNG state to ensure other random operations (if any) are consistent
-                torch.set_rng_state(state)
+                for attempt in range(max_retries):
+                    # Use consistent seed for base attempt to ensure accent consistency
+                    # For retries, vary seed slightly to avoid regenerating the exact same artifact
+                    current_seed = consistent_seed + attempt if attempt > 0 else consistent_seed
+                    
+                    torch.manual_seed(current_seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(current_seed)
+                    
+                    # Restore RNG state to ensure other random operations (if any) are consistent
+                    torch.set_rng_state(state)
 
-                # Use inference_mode for faster inference (no gradient tracking)
-                with torch.inference_mode():
-                    # Different generate call based on model type
-                    if model_type == "multilingual":
-                        # CRITICAL: Use the EXACT same locked parameters for every chunk
-                        # These values are calculated once and never modified to ensure consistency
-                        output = tts.generate(
-                            text=chunk_text,
-                            audio_prompt_path=str(voice_path),
-                            language_id=language,  # Same language_id for all chunks
-                            exaggeration=final_exaggeration,  # Same exaggeration for all chunks
-                            temperature=final_temperature,  # Same temperature for all chunks
-                            cfg_weight=final_cfg_weight,  # Same cfg_weight for all chunks
-                        )
-                        # Verify parameters are being used correctly (log first chunk only to avoid spam)
-                        if i == 0:
-                            print(f"[tts] ✓ Chunk {i+1} using verified parameters: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}")
+                    # Use inference_mode for faster inference (no gradient tracking)
+                    with torch.inference_mode():
+                        # Different generate call based on model type
+                        if model_type == "multilingual":
+                            # CRITICAL: Use the EXACT same locked parameters for every chunk
+                            # These values are calculated once and never modified to ensure consistency
+                            output = tts.generate(
+                                text=chunk_text,
+                                audio_prompt_path=str(voice_path),
+                                language_id=language,  # Same language_id for all chunks
+                                exaggeration=final_exaggeration,  # Same exaggeration for all chunks
+                                temperature=final_temperature,  # Same temperature
+                                cfg_weight=final_cfg_weight,    # Same CFG weight
+                            )
+                            # Verify parameters are being used correctly (log first chunk only to avoid spam)
+                            if i == 0 and attempt == 0:
+                                print(f"[tts] ✓ Chunk {i+1} using verified parameters: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}")
+                        else:
+                            # English model doesn't use language_id
+                            # Use locked parameters for consistency (same for all chunks)
+                            output = tts.generate(
+                                text=chunk_text,
+                                audio_prompt_path=str(voice_path),
+                                exaggeration=final_exaggeration,  # Same for all chunks
+                                temperature=final_temperature,  # Same for all chunks
+                                cfg_weight=final_cfg_weight,  # Same for all chunks
+                            )
+                            # Verify parameters are being used correctly (log first chunk only to avoid spam)
+                            if i == 0 and attempt == 0:
+                                print(f"[tts] ✓ Chunk {i+1} using verified parameters: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}")
+
+                    # Check validity
+                    wav_candidate = to_numpy(output)
+                    
+                    # Validity Check 1: Duration
+                    duration_sec = len(wav_candidate) / SAMPLE_RATE
+                    text_len = len(chunk_text)
+                    is_too_short = (text_len > 25 and duration_sec < 0.8) or (text_len > 5 and duration_sec < 0.2)
+                    
+                    # Validity Check 2: Silence/Noise (RMS)
+                    rms = np.sqrt(np.mean(wav_candidate**2)) if len(wav_candidate) > 0 else 0
+                    is_silence = rms < 0.005 # Very quiet = suspicious
+                    
+                    if len(wav_candidate) > 0 and not is_too_short and not is_silence:
+                        chunk_audio = wav_candidate
+                        if attempt > 0:
+                            print(f"[tts] ♻️ Retry {attempt} successful for chunk {i+1} (valid audio generated)")
+                        break
                     else:
-                        # English model doesn't use language_id
-                        # Use locked parameters for consistency (same for all chunks)
-                        output = tts.generate(
-                            text=chunk_text,
-                            audio_prompt_path=str(voice_path),
-                            exaggeration=final_exaggeration,  # Same for all chunks
-                            temperature=final_temperature,  # Same for all chunks
-                            cfg_weight=final_cfg_weight,  # Same for all chunks
-                        )
-                        # Verify parameters are being used correctly (log first chunk only to avoid spam)
-                        if i == 0:
-                            print(f"[tts] ✓ Chunk {i+1} using verified parameters: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}")
-
-                wav = to_numpy(output)
+                        print(f"[tts] ⚠️ Chunk {i+1} attempt {attempt+1} suspect: len={duration_sec:.2f}s, rms={rms:.4f}. Retrying...")
+                
+                if chunk_audio is None:
+                    print(f"[tts] ❌ Chunk {i+1} failed after {max_retries} attempts.")
+                    chunk_audio = np.zeros(int(SAMPLE_RATE * 0.5), dtype=np.float32) # Fallback to silence
+                
+                wav = chunk_audio
                 chunk_time = time.time() - chunk_start
                 print(f"[tts]   Generated {len(wav)} samples in {chunk_time:.2f}s")
 
