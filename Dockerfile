@@ -11,6 +11,7 @@ ENV TRANSFORMERS_CACHE="/runpod-volume/.cache/huggingface/transformers"
 # Install system dependencies including audio libraries
 RUN apt-get update && apt-get install -y \
     git \
+    git-lfs \
     ffmpeg \
     libsndfile1 \
     libsndfile1-dev \
@@ -18,6 +19,9 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Initialize git-lfs
+RUN git lfs install
 
 # Clone Chatterbox
 RUN git clone https://github.com/resemble-ai/chatterbox.git .
