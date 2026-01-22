@@ -1229,6 +1229,20 @@ def generate_tts_handler(job):
                 print(f"[tts]   Generated {len(wav)} samples in {chunk_time:.2f}s")
 
                 if len(wav) > 0:
+                    # Normalize EACH chunk individually to ensure consistent volume across sentences
+                    # This prevents some sentences from being much quieter than others
+                    chunk_max = np.max(np.abs(wav))
+                    if chunk_max > 1e-6:
+                        # Normalize to -1.0 dB (approx 0.89 amplitude) for headroom
+                        target_chunk_peak = 0.89
+                        chunk_gain = target_chunk_peak / chunk_max
+                        
+                        # Apply limits to avoid amplifying silence or noise too much
+                        # Max 12dB boost (4x), min 6dB cut (0.5x)
+                        chunk_gain = max(0.5, min(chunk_gain, 4.0))
+                        
+                        wav = wav * chunk_gain
+                        
                     audio_chunks.append(wav)
             except Exception as e:
                 print(f"[tts]   Error: {e}")
