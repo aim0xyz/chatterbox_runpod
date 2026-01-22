@@ -581,7 +581,19 @@ def apply_resemble_enhance(wav, sample_rate=24000):
         # Apply enhancement
         # denoise: removes background noise
         # enhance: improves clarity and removes artifacts
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # OPTIMIZATION: Use CPU for enhancement to save GPU for TTS generation
+        # Enhancement is less GPU-intensive than TTS, so CPU works well
+        # This frees up GPU for concurrent TTS jobs
+        use_cpu_for_enhance = True  # Default: use CPU to save GPU resources
+        
+        if use_cpu_for_enhance:
+            device = torch.device("cpu")
+            print(f"[enhance] Using CPU for enhancement (saves GPU for TTS generation)")
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"[enhance] Using {device} for enhancement")
+        
         wav_tensor = wav_tensor.to(device)
         
         # First pass: denoise (removes background noise and breathing)
