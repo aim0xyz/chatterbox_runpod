@@ -85,6 +85,17 @@ RUN pip install --no-cache-dir \
     webrtcvad==2.0.10 \
     audioread==3.0.1
 
+# ============================================
+# AI Audio Enhancement (Resemble Enhance)
+# ============================================
+
+# Install Resemble Enhance for artifact removal
+# This adds ~500MB to image size but significantly improves audio quality
+RUN pip install --no-cache-dir resemble-enhance
+
+# Pre-download enhancement models to avoid cold start
+RUN python -c "from resemble_enhance.enhancer.inference import denoise, enhance; print('Resemble Enhance models cached')" || echo "Enhancement models will download on first use"
+
 # Install RunPod and audio I/O
 RUN pip install --no-cache-dir "runpod>=0.9.0" soundfile
 

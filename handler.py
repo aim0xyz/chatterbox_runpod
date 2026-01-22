@@ -8,6 +8,7 @@ import subprocess
 import sys
 import traceback
 import json
+import time
 from pathlib import Path
 
 import runpod
@@ -540,6 +541,85 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
     print(f"[stitch] Final stitched audio: {len(result)} samples, RMS: {final_rms:.4f}, Peak: {final_peak:.4f}")
     return result
 
+def apply_resemble_enhance(wav, sample_rate=24000):
+    """
+    Apply Resemble Enhance to remove artifacts and improve audio quality.
+    This is the FINAL processing step, applied after all other processing.
+    
+    Resemble Enhance uses AI to:
+    - Remove breathing sounds
+    - Reduce background noise
+    - Remove clicks and pops
+    - Improve overall clarity
+    """
+    try:
+        # Check if resemble_enhance is available
+        try:
+            from resemble_enhance.enhancer.inference import denoise, enhance
+            import torchaudio
+        except ImportError:
+            print("[enhance] ⚠️ Resemble Enhance not installed - skipping enhancement")
+            print("[enhance] Install with: pip install resemble-enhance")
+            return wav
+        
+        print(f"[enhance] Applying Resemble Enhance to {len(wav)} samples...")
+        enhance_start = time.time()
+        
+        # Convert numpy array to torch tensor
+        # Resemble Enhance expects shape: (channels, samples)
+        wav_tensor = torch.from_numpy(wav).unsqueeze(0).float()  # Add channel dimension
+        
+        # Resemble Enhance works best at 44.1kHz, so resample if needed
+        if sample_rate != 44100:
+            print(f"[enhance] Resampling from {sample_rate}Hz to 44100Hz for enhancement...")
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=sample_rate,
+                new_freq=44100
+            )
+            wav_tensor = resampler(wav_tensor)
+        
+        # Apply enhancement
+        # denoise: removes background noise
+        # enhance: improves clarity and removes artifacts
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        wav_tensor = wav_tensor.to(device)
+        
+        # First pass: denoise (removes background noise and breathing)
+        denoised = denoise(wav_tensor, 44100, device=device)
+        
+        # Second pass: enhance (improves clarity, removes remaining artifacts)
+        enhanced = enhance(denoised, 44100, device=device)
+        
+        # Convert back to numpy
+        enhanced_wav = enhanced.squeeze(0).cpu().numpy()
+        
+        # Resample back to original sample rate if needed
+        if sample_rate != 44100:
+            print(f"[enhance] Resampling back from 44100Hz to {sample_rate}Hz...")
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=44100,
+                new_freq=sample_rate
+            )
+            enhanced_tensor = torch.from_numpy(enhanced_wav).unsqueeze(0)
+            enhanced_wav = resampler(enhanced_tensor).squeeze(0).numpy()
+        
+        enhance_time = time.time() - enhance_start
+        
+        # Calculate improvement metrics
+        original_rms = float(np.sqrt(np.mean(wav ** 2)))
+        enhanced_rms = float(np.sqrt(np.mean(enhanced_wav ** 2)))
+        
+        print(f"[enhance] ✅ Enhancement complete in {enhance_time:.2f}s")
+        print(f"[enhance] RMS: {original_rms:.4f} → {enhanced_rms:.4f}")
+        
+        return enhanced_wav.astype(np.float32)
+        
+    except Exception as e:
+        print(f"[enhance] ❌ Enhancement failed: {e}")
+        traceback.print_exc()
+        print(f"[enhance] Returning original audio")
+        return wav
+
 # ============================================
 # VOICE VERIFICATION FUNCTIONS
 # ============================================
@@ -889,6 +969,14 @@ def generate_tts_handler(job):
         
         voice_language_from_metadata = False
         
+        # Enhancement parameter - enable AI-powered artifact removal (optional, adds ~3-5s)
+        # This applies Resemble Enhance as the final processing step
+        enhance_audio = bool(inp.get("enhance_audio", True))  # Default: ENABLED for all users ✨
+        if enhance_audio:
+            print(f"[tts] ✨ Audio enhancement enabled (Resemble Enhance)")
+        else:
+            print(f"[tts] ⚠️ Audio enhancement disabled (faster but lower quality)")
+
         # If using a preset voice, preset voices are ALWAYS English
         if preset_voice:
             voice_language = "en"
@@ -1230,6 +1318,13 @@ def generate_tts_handler(job):
                     print(f"[tts] Applied soft limiter to prevent clipping (peak was {max_after:.3f})")
         elif not normalize_volume:
             print(f"[tts] Volume normalization disabled by request")
+
+        # --- FINAL STEP: AI Enhancement (Optional) ---
+        # This is applied LAST, after all other processing is complete
+        # Resemble Enhance will remove breathing, noise, and artifacts
+        if enhance_audio and len(final_wav) > 0:
+            final_wav = apply_resemble_enhance(final_wav, sample_rate=SAMPLE_RATE)
+
 
         buf = io.BytesIO()
         sf.write(buf, final_wav, SAMPLE_RATE, format="WAV")
