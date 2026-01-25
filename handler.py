@@ -139,8 +139,8 @@ def get_voice_language(user_id=None, filename=None):
     try:
         user_dir = get_user_dir(user_id)
         # Look for metadata file: voice_name.json
-        voice_name = Path(filename).stem  # Remove extension
-        metadata_path = user_dir / f"{voice_name}.json"
+        # Use with_suffix to preserve directory structure if filename includes path (e.g. de/voice.wav)
+        metadata_path = user_dir / Path(filename).with_suffix('.json')
         
         if metadata_path.exists():
             with open(metadata_path, 'r') as f:
@@ -155,10 +155,13 @@ def save_voice_language(user_id, filename, language):
     """Save the language metadata for a voice file."""
     try:
         user_dir = get_user_dir(user_id)
-        voice_name = Path(filename).stem  # Remove extension
-        metadata_path = user_dir / f"{voice_name}.json"
+        # Use with_suffix to preserve directory structure if filename includes path (e.g. de/voice.wav)
+        metadata_path = user_dir / Path(filename).with_suffix('.json')
         
-        metadata = {"language": language, "filename": filename}
+        # Ensure directory exists (in case of legacy paths or new folder structure)
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        metadata = {"language": language, "filename": str(filename)}
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f)
         print(f"[voice_lang] Saved language metadata: {language} for {filename}")
@@ -1474,8 +1477,36 @@ def clone_voice_handler(job):
         with open(temp_path, "wb") as f:
             f.write(base64.b64decode(audio_b64))
 
-        final_name = f"{voice_name}_{uuid.uuid4().hex[:6]}.wav"
-        final_path = user_dir / final_name
+        # Organize by language if provided
+        final_filename = f"{voice_name}_{uuid.uuid4().hex[:6]}.wav"
+        
+        # Determine save directory and relative path
+        if voice_language and voice_language != "en": # Optional: keep English in root or put in 'en'? User said "de folder... and same for other languages".
+            # Let's put ALL languages in folders for consistency if we are starting this
+            # OR just non-English? 
+            # The prompt says: "when a user records a voice in a specific language for example de that the voice is saved ... in a de folder and the same for other languages"
+            # It implies consistency.
+            # But changing layout for existing English voices might be confusing.
+            # However, for NEW voices, we can enforce it.
+            
+            # Use language folder
+            save_dir = user_dir / voice_language
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            final_path = save_dir / final_filename
+            # The embedding_filename should be the relative path from user voice root
+            # e.g. "de/MyVoice_123.wav"
+            return_filename = f"{voice_language}/{final_filename}"
+        else:
+            # For English (or unspecified), we can either put in 'en' folder or keep in root.
+            # Keeping in root is safer for backward compatibility logic unless we fully migrate.
+            # But the user asked "same for other languages".
+            # Let's use 'en' folder for English too for new voices.
+            save_dir = user_dir / voice_language
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            final_path = save_dir / final_filename
+            return_filename = f"{voice_language}/{final_filename}"
 
         try:
             # Convert uploaded audio to 24 kHz mono WAV for cloning
@@ -1539,20 +1570,46 @@ def clone_voice_handler(job):
                     print(f"[clone]   Normalized RMS={final_rms:.4f} (target={target_rms:.2f})")
                 else:
                     print(f"[clone]   RMS is zero, skipping normalization for {final_name}")
+                    print(f"[clone]   RMS is zero, skipping normalization for {final_filename}")
         except Exception as e:
             # Don't fail the whole clone if normalization has issues
             print(f"[clone] ⚠️ Error normalizing recording loudness: {e}")
             traceback.print_exc()
 
-        print(f"[clone] Saved: {final_name}")
-        
         # Save voice language metadata for automatic detection during TTS generation
-        save_voice_language(user_id, final_name, voice_language)
+        save_voice_language(user_id, return_filename, voice_language)
 
+        # Save consent file if provided
+        consent_text = inp.get("consent_text")
+        if consent_text:
+            try:
+                # Create consent filename: voice_filename_consent.json
+                # final_path is the absolute path to the wav file
+                consent_path = final_path.with_name(f"{final_path.stem}_consent.json")
+                
+                consent_data = {
+                    "user_id": user_id,
+                    "voice_id": return_filename,
+                    "voice_name": voice_name,
+                    "consent_text": consent_text,
+                    "timestamp": datetime.now().isoformat(), # datetime is imported
+                    "agreement_version": "1.0",
+                    "language": voice_language
+                }
+                
+                with open(consent_path, 'w') as f:
+                    json.dump(consent_data, f, indent=2)
+                
+                print(f"[clone] Saved consent to: {consent_path}")
+            except Exception as e:
+                print(f"[clone] ⚠️ Error saving consent file: {e}")
+
+        print(f"[clone] Saved: {return_filename}")
+        
         return {
             "status": "success",
             "user_id": user_id,
-            "embedding_filename": final_name,
+            "embedding_filename": return_filename,
             "voice_name": voice_name,
             "voice_language": voice_language,  # Return the language for client reference
         }
