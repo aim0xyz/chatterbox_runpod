@@ -15,6 +15,7 @@ import runpod
 import torch
 import soundfile as sf
 import numpy as np
+from datetime import datetime
 
 print(f"[startup] Python: {sys.version}")
 
@@ -1524,7 +1525,7 @@ def clone_voice_handler(job):
         # --- Normalize recorded voice loudness for better cloning quality ---
         try:
             if final_path.exists():
-                print(f"[clone] Normalizing recording loudness for {final_name}")
+                print(f"[clone] Normalizing recording loudness for {final_filename}")
                 wav, sr = sf.read(str(final_path), always_2d=False)
 
                 # Ensure mono
