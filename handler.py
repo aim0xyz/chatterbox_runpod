@@ -680,6 +680,34 @@ def apply_resemble_enhance(wav, sample_rate=24000):
         print(f"[enhance] Returning original audio")
         return wav
 
+def change_speed(wav, speed=1.0):
+    """Change the speed of the audio without changing pitch."""
+    if abs(speed - 1.0) < 0.01:
+        return wav
+    
+    try:
+        # Lazy import librosa to avoid startup overhead
+        import librosa
+        
+        # librosa time_stretch works on complex stft or audio
+        # Ideally we use time_stretch from effects
+        # It handles time stretching via phase vocoder
+        
+        # Check usage: librosa.effects.time_stretch(y, rate=rate)
+        # speed > 1.0 = faster, speed < 1.0 = slower
+        
+        if len(wav) < 500: # Too short to stretch safely
+            return wav
+            
+        print(f"[speed] Applying speed change: {speed}x")
+        stretched = librosa.effects.time_stretch(wav, rate=speed)
+        return stretched.astype(np.float32)
+        
+    except Exception as e:
+        print(f"[speed] ⚠️ Failed to change speed: {e}")
+        # fallback
+        return wav
+
 # ============================================
 # VOICE VERIFICATION FUNCTIONS
 # ============================================
@@ -1109,6 +1137,10 @@ def generate_tts_handler(job):
         exaggeration = float(inp.get("exaggeration", 0.6))
         temperature = float(inp.get("temperature", 0.65))
         cfg_weight = float(inp.get("cfg_weight", 0.8))
+        
+        # Speed parameter - default to 0.9 for better storytelling cadence (kids app)
+        # User reported "speaking way too fast", so we slow it down slightly by default
+        speed = float(inp.get("speed", 0.9))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
@@ -1332,7 +1364,35 @@ def generate_tts_handler(job):
         if not audio_chunks:
             return {"error": "No audio generated"}
 
-        final_wav = stitch_chunks(audio_chunks, chunks, pause_ms=pause_ms)
+        # Process audio chunks (Enhance -> Speed -> Trim)
+        # Doing this PER CHUNK is critical to avoid "huge gaps" caused by 
+        # enhancing stitched audio where artifacts become silence.
+        processed_chunks = []
+        
+        print(f"[tts] Processing {len(audio_chunks)} generated chunks...")
+        
+        for i, chunk in enumerate(audio_chunks):
+            wav_proc = chunk
+            
+            # 1. Enhance (if enabled)
+            # Remove artifacts/noise BEFORE stitching
+            if enhance_audio:
+                wav_proc = apply_resemble_enhance(wav_proc, sample_rate=SAMPLE_RATE)
+            
+            # 2. Trim Silence (Aggressive)
+            # This is CRITICAL: if enhance converted a "hallucination" at the end 
+            # into silence, we MUST trim it now, otherwise it becomes a "huge gap"
+            wav_proc = trim_trailing_silence(wav_proc, threshold_db=-40)
+            
+            # 3. Apply Speed Change
+            # Slow down if requested (e.g. for kids)
+            if abs(speed - 1.0) > 0.01:
+                wav_proc = change_speed(wav_proc, speed=speed)
+            
+            processed_chunks.append(wav_proc)
+
+        # Stitch processed chunks
+        final_wav = stitch_chunks(processed_chunks, chunks, pause_ms=pause_ms)
 
         # --- Apply comprehensive audio post-processing to reduce artifacts ---
         if len(final_wav) > 0:
@@ -1423,11 +1483,11 @@ def generate_tts_handler(job):
         elif not normalize_volume:
             print(f"[tts] Volume normalization disabled by request")
 
-        # --- FINAL STEP: AI Enhancement (Optional) ---
-        # This is applied LAST, after all other processing is complete
-        # Resemble Enhance will remove breathing, noise, and artifacts
-        if enhance_audio and len(final_wav) > 0:
-            final_wav = apply_resemble_enhance(final_wav, sample_rate=SAMPLE_RATE)
+        # --- FINAL STEP: AI Enhancement (MOVED) ---
+        # NOTE: Enhancement is now applied per-chunk BEFORE stitching (Lines 1340+)
+        # This prevents "huge gaps" and improves consistency.
+        # if enhance_audio and len(final_wav) > 0:
+        #    final_wav = apply_resemble_enhance(final_wav, sample_rate=SAMPLE_RATE)
 
 
         buf = io.BytesIO()
@@ -1451,6 +1511,7 @@ def generate_tts_handler(job):
             "preserve_voice_accent": preserve_voice_accent,
             "accent_control": accent_control,
             "model_type": model_type,
+            "speed": speed,
         }
 
     except Exception as e:
