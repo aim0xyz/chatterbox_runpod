@@ -522,7 +522,8 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         elif '\n' in prev_text:
             current_pause = 1000  # Increased from 900: Paragraph break
         else:
-            current_pause = 200  # Increased from 150: Natural breath
+            # Increased from 200 -> 300: Slower pacing between phrases/chunks to sound more thoughtful
+            current_pause = 300
             
         pause_samples = int(SAMPLE_RATE * current_pause / 1000)
         
@@ -1153,13 +1154,13 @@ def generate_tts_handler(job):
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
 
-        # Tweak parameters for better voice cloning fidelity (faithful to user's style)
-        # Lower exaggeration = less forced drama, more natural to the original voice (was 0.85)
-        # Slightly lower temperature = more stability/less random variation (was 0.72)
-        # Higher cfg_weight = more influence from the voice sample style (was 0.5)
-        exaggeration = float(inp.get("exaggeration", 0.6))
-        temperature = float(inp.get("temperature", 0.65))
-        cfg_weight = float(inp.get("cfg_weight", 0.8))
+        # Tweak parameters to maximize voice fidelity and achieve naturally slower speech
+        # - Lower exaggeration (0.4): Makes speech calmer and naturally slower (less "rushed/excited")
+        # - Lower temperature (0.35): Makes model strictly adhere to the voice (less random variation)
+        # - Higher cfg_weight (0.95): Forces the model to try harder to copy the audio prompt style
+        exaggeration = float(inp.get("exaggeration", 0.4))
+        temperature = float(inp.get("temperature", 0.35))
+        cfg_weight = float(inp.get("cfg_weight", 0.95))
         
         # Speed parameter - default to 1.0 (normal) to avoid robotic artifacts.
         # We address "speaking too fast" by increasing pauses between sentences instead.
