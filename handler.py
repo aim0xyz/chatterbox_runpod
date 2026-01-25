@@ -516,13 +516,13 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         # Determine specific pause based on punctuation
         current_pause = pause_ms
         if prev_text.endswith(('.', '!', '?')):
-            current_pause = 650  # Long pause for sentences
+            current_pause = 850  # Increased from 650: Longer pause for sentences (better storytelling pacing)
         elif prev_text.endswith((',', ';', ':')):
-            current_pause = 300  # Medium pause for commas
+            current_pause = 400  # Increased from 300: Clearer separation for clauses
         elif '\n' in prev_text:
-            current_pause = 900  # Very long for paragraphs
+            current_pause = 1000  # Increased from 900: Paragraph break
         else:
-            current_pause = 150  # Natural breath
+            current_pause = 200  # Increased from 150: Natural breath
             
         pause_samples = int(SAMPLE_RATE * current_pause / 1000)
         
@@ -680,33 +680,56 @@ def apply_resemble_enhance(wav, sample_rate=24000):
         print(f"[enhance] Returning original audio")
         return wav
 
-def change_speed(wav, speed=1.0):
-    """Change the speed of the audio without changing pitch."""
+def change_speed(wav, speed=1.0, sample_rate=24000):
+    """Change the speed of the audio using FFmpeg (higher quality than phase vocoder)."""
     if abs(speed - 1.0) < 0.01:
         return wav
     
     try:
-        # Lazy import librosa to avoid startup overhead
-        import librosa
+        # Use /tmp for temp files
+        temp_dir = Path("/tmp/speed_change")
+        temp_dir.mkdir(parents=True, exist_ok=True)
         
-        # librosa time_stretch works on complex stft or audio
-        # Ideally we use time_stretch from effects
-        # It handles time stretching via phase vocoder
+        unique_id = uuid.uuid4().hex
+        in_path = temp_dir / f"in_{unique_id}.wav"
+        out_path = temp_dir / f"out_{unique_id}.wav"
         
-        # Check usage: librosa.effects.time_stretch(y, rate=rate)
-        # speed > 1.0 = faster, speed < 1.0 = slower
+        # Write input
+        sf.write(str(in_path), wav, sample_rate)
         
-        if len(wav) < 500: # Too short to stretch safely
-            return wav
+        # Use ffmpeg atempo filter
+        # atempo limits: 0.5 to 2.0
+        safe_speed = max(0.5, min(speed, 2.0))
+        
+        cmd = [
+            "ffmpeg", "-y", "-i", str(in_path),
+            "-filter:a", f"atempo={safe_speed}",
+            "-vn", str(out_path)
+        ]
+        
+        # Run ffmpeg with timeout
+        subprocess.run(cmd, check=True, capture_output=True, timeout=10)
+        
+        if out_path.exists():
+            new_wav, _ = sf.read(str(out_path), dtype='float32')
             
-        print(f"[speed] Applying speed change: {speed}x")
-        stretched = librosa.effects.time_stretch(wav, rate=speed)
-        return stretched.astype(np.float32)
-        
+            # Cleanup
+            in_path.unlink(missing_ok=True)
+            out_path.unlink(missing_ok=True)
+            
+            print(f"[speed] Changed speed by {safe_speed}x using FFmpeg")
+            return new_wav
+            
     except Exception as e:
-        print(f"[speed] ⚠️ Failed to change speed: {e}")
-        # fallback
-        return wav
+        print(f"[speed] ⚠️ FFmpeg speed change failed: {e}")
+        # Cleanup
+        try:
+            if 'in_path' in locals(): in_path.unlink(missing_ok=True)
+            if 'out_path' in locals(): out_path.unlink(missing_ok=True)
+        except:
+            pass
+        
+    return wav
 
 # ============================================
 # VOICE VERIFICATION FUNCTIONS
@@ -1138,9 +1161,9 @@ def generate_tts_handler(job):
         temperature = float(inp.get("temperature", 0.65))
         cfg_weight = float(inp.get("cfg_weight", 0.8))
         
-        # Speed parameter - default to 0.9 for better storytelling cadence (kids app)
-        # User reported "speaking way too fast", so we slow it down slightly by default
-        speed = float(inp.get("speed", 0.9))
+        # Speed parameter - default to 1.0 (normal) to avoid robotic artifacts.
+        # We address "speaking too fast" by increasing pauses between sentences instead.
+        speed = float(inp.get("speed", 1.0))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
@@ -1387,7 +1410,7 @@ def generate_tts_handler(job):
             # 3. Apply Speed Change
             # Slow down if requested (e.g. for kids)
             if abs(speed - 1.0) > 0.01:
-                wav_proc = change_speed(wav_proc, speed=speed)
+                wav_proc = change_speed(wav_proc, speed=speed, sample_rate=SAMPLE_RATE)
             
             processed_chunks.append(wav_proc)
 
