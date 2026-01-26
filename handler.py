@@ -20,47 +20,93 @@ from datetime import datetime
 # --- Firebase Integration ---
 try:
     import firebase_admin
-    from firebase_admin import credentials, messaging, firestore
+    from firebase_admin import credentials, messaging, firestore, storage
     print("[startup] Firebase Admin SDK imported")
 except ImportError:
     firebase_admin = None
     print("[startup] ⚠️ Firebase Admin SDK not found - notifications disabled")
 
-def send_voice_ready_notification(user_id, voice_name):
-    """Send FCM notification to user when their custom voice is ready."""
-    if not firebase_admin:
-        return
-
-    try:
-        # Initialize Firebase if not already initialized
-        if not firebase_admin._apps:
-            # OPTION 1: Try Environment Variable (Best for RunPod)
-            # Key: FIREBASE_SERVICE_ACCOUNT_JSON
-            # Value: The entire content of the serviceAccountKey.json file
+def _ensure_firebase_init():
+    if firebase_admin and not firebase_admin._apps:
+        try:
+            options = {}
+            cred = None
+            
+            # 1. Env Var
             env_creds = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
             if env_creds:
-                try:
-                    cred_dict = json.loads(env_creds)
-                    cred = credentials.Certificate(cred_dict)
-                    firebase_admin.initialize_app(cred)
-                    print("[firebase] Initialized with Environment Variable credential")
-                except Exception as e:
-                    print(f"[firebase] ⚠️ Failed to parse env var credentials: {e}")
-
-        # OPTION 2: Try File (Fallback)
-        if not firebase_admin._apps:
-            key_path = Path("/runpod-volume/serviceAccountKey.json")
-            if key_path.exists():
-                cred = credentials.Certificate(str(key_path))
-                firebase_admin.initialize_app(cred)
-                print("[firebase] Initialized with service account file")
+                cred_dict = json.loads(env_creds)
+                cred = credentials.Certificate(cred_dict)
+                if 'project_id' in cred_dict:
+                    options['storageBucket'] = f"{cred_dict['project_id']}.appspot.com"
+            
+            # 2. File Fallback
+            if not cred:
+                key_path = Path("/runpod-volume/serviceAccountKey.json")
+                if key_path.exists():
+                    cred = credentials.Certificate(str(key_path))
+                    try:
+                        with open(key_path) as f:
+                            d = json.load(f)
+                            if 'project_id' in d:
+                                options['storageBucket'] = f"{d['project_id']}.appspot.com"
+                    except: pass
+            
+            if cred:
+                firebase_admin.initialize_app(cred, options)
+                print(f"[firebase] Initialized (bucket={options.get('storageBucket')})")
             else:
-                # Only log error if BOTH methods failed
-                if not os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON"):
-                    print("[firebase] ⚠️ Notification skipped: No credentials found.")
-                    print("           Set 'FIREBASE_SERVICE_ACCOUNT_JSON' env var OR upload 'serviceAccountKey.json' to /runpod-volume/")
-                return
+                print("[firebase] ⚠️ No credentials found")
+        except Exception as e:
+            print(f"[firebase] Init error: {e}")
+
+def upload_story_audio(user_id, story_id, audio_bytes):
+    _ensure_firebase_init()
+    if not firebase_admin or not firebase_admin._apps: return False
+    try:
+        bucket = storage.bucket()
+        blob = bucket.blob(f"users/{user_id}/generated_stories/{story_id}.wav")
+        blob.upload_from_string(audio_bytes, content_type='audio/wav')
+        print(f"[storage] Uploaded story audio: {story_id}")
+        return True
+    except Exception as e:
+        print(f"[storage] Upload failed: {e}")
+        return False
+
+def send_audio_ready_notification(user_id, story_title, story_id):
+    _ensure_firebase_init()
+    if not firebase_admin or not firebase_admin._apps: return
+    try:
+        db = firestore.client()
+        user_ref = db.collection('users').document(user_id)
+        doc = user_ref.get()
+        if not doc.exists: return
         
+        token = doc.to_dict().get('fcmToken')
+        if token:
+            msg = messaging.Message(
+                notification=messaging.Notification(
+                    title='Story Audio Ready! 🎧',
+                    body=f'"{story_title}" is ready to listen!',
+                ),
+                data={
+                    'type': 'audio_ready',
+                    'story_id': story_id,
+                    'click_action': 'FLUTTER_NOTIFICATION_CLICK',
+                },
+                token=token
+            )
+            messaging.send(msg)
+            print(f"[notify] Audio notification sent to {user_id}")
+    except Exception as e:
+        print(f"[notify] Error: {e}")
+
+def send_voice_ready_notification(user_id, voice_name):
+    """Send FCM notification to user when their custom voice is ready."""
+    _ensure_firebase_init()
+    if not firebase_admin or not firebase_admin._apps: return
+
+    try:
         # Get Firestore client
         db = firestore.client()
         
@@ -1598,6 +1644,21 @@ def generate_tts_handler(job):
 
         buf = io.BytesIO()
         sf.write(buf, final_wav, SAMPLE_RATE, format="WAV")
+        
+        # --- Background Support: Upload & Notify ---
+        # If story_id is provided, upload to Firebase Storage and notify user
+        # This handles cases where the app is backgrounded or terminated
+        story_id = inp.get("story_id")
+        if story_id and user_id:
+            print(f"[tts] Saving to cloud storage for persistent access (story_id: {story_id})")
+            story_title = inp.get("story_title", "Your Story")
+            
+            # Upload (using getvalue() which doesn't affect stream position)
+            upload_success = upload_story_audio(user_id, story_id, buf.getvalue())
+            
+            if upload_success:
+                 send_audio_ready_notification(user_id, story_title, story_id)
+        
         buf.seek(0)
         audio_b64 = base64.b64encode(buf.read()).decode('utf-8')
 
