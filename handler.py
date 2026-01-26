@@ -17,6 +17,88 @@ import soundfile as sf
 import numpy as np
 from datetime import datetime
 
+# --- Firebase Integration ---
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging, firestore
+    print("[startup] Firebase Admin SDK imported")
+except ImportError:
+    firebase_admin = None
+    print("[startup] ⚠️ Firebase Admin SDK not found - notifications disabled")
+
+def send_voice_ready_notification(user_id, voice_name):
+    """Send FCM notification to user when their custom voice is ready."""
+    if not firebase_admin:
+        return
+
+    try:
+        # Initialize Firebase if not already initialized
+        if not firebase_admin._apps:
+            # OPTION 1: Try Environment Variable (Best for RunPod)
+            # Key: FIREBASE_SERVICE_ACCOUNT_JSON
+            # Value: The entire content of the serviceAccountKey.json file
+            env_creds = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+            if env_creds:
+                try:
+                    cred_dict = json.loads(env_creds)
+                    cred = credentials.Certificate(cred_dict)
+                    firebase_admin.initialize_app(cred)
+                    print("[firebase] Initialized with Environment Variable credential")
+                except Exception as e:
+                    print(f"[firebase] ⚠️ Failed to parse env var credentials: {e}")
+
+        # OPTION 2: Try File (Fallback)
+        if not firebase_admin._apps:
+            key_path = Path("/runpod-volume/serviceAccountKey.json")
+            if key_path.exists():
+                cred = credentials.Certificate(str(key_path))
+                firebase_admin.initialize_app(cred)
+                print("[firebase] Initialized with service account file")
+            else:
+                # Only log error if BOTH methods failed
+                if not os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON"):
+                    print("[firebase] ⚠️ Notification skipped: No credentials found.")
+                    print("           Set 'FIREBASE_SERVICE_ACCOUNT_JSON' env var OR upload 'serviceAccountKey.json' to /runpod-volume/")
+                return
+        
+        # Get Firestore client
+        db = firestore.client()
+        
+        # Get user's FCM token
+        user_ref = db.collection('users').document(user_id)
+        doc = user_ref.get()
+        
+        if not doc.exists:
+            print(f"[notify] User {user_id} not found in Firestore")
+            return
+            
+        fcm_token = doc.to_dict().get('fcmToken')
+        if not fcm_token:
+            print(f"[notify] User {user_id} has no FCM token")
+            return
+            
+        print(f"[notify] Sending notification to {user_id} (Voice: {voice_name})")
+        
+        # Send Push Notification
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title='New Voice Ready! 🎤',
+                body=f'{voice_name} is ready for your stories!',
+            ),
+            data={
+                'type': 'voice_ready',
+                'voice_name': voice_name,
+                'click_action': 'FLUTTER_NOTIFICATION_CLICK',
+            },
+            token=fcm_token,
+        )
+        
+        response = messaging.send(message)
+        print(f"[notify] ✅ Notification sent: {response}")
+        
+    except Exception as e:
+        print(f"[notify] ❌ Error sending notification: {e}")
+
 print(f"[startup] Python: {sys.version}")
 
 # --- Import Multilingual TTS ---
@@ -1691,6 +1773,10 @@ def clone_voice_handler(job):
                 print(f"[clone] ⚠️ Error saving consent file: {e}")
 
         print(f"[clone] Saved: {return_filename}")
+        
+        # --- Notify User ---
+        # Send push notification to the user that their voice is ready
+        send_voice_ready_notification(user_id, voice_name)
         
         return {
             "status": "success",

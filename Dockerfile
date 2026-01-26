@@ -101,7 +101,7 @@ RUN pip install --no-cache-dir resemble-enhance
 RUN python -c "from resemble_enhance.enhancer.inference import denoise, enhance; print('Resemble Enhance models cached')" || echo "Enhancement models will download on first use"
 
 # Install RunPod and audio I/O
-RUN pip install --no-cache-dir "runpod>=0.9.0" soundfile
+RUN pip install --no-cache-dir "runpod>=0.9.0" soundfile firebase-admin
 
 # Pre-download Whisper model to avoid cold starts
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', download_root='/runpod-volume/.cache/whisper')" || echo "Whisper model will download on first use"
