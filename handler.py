@@ -312,32 +312,35 @@ def preprocess_german_text(text):
     """Apply German-specific phonetic fixes for better TTS pronunciation."""
     # Fix common German words where 's' before 't' or 'p' should be pronounced "sch"
     # This is a workaround for TTS models that don't handle German phonetics well
+    # The replacements below are commented out because they were causing a "lisping" sound
+    # in high-quality multilingual models. German speakers naturally pronounce 'st' and 'sp'
+    # correctly, and forced 'sch' substitution leads to over-articulation.
     replacements = {
         # Common words with "st" that should sound like "scht"
-        r'\bSeestern\b': 'Seeschtern',
-        r'\bstern\b': 'schtern',
-        r'\bStern\b': 'Schtern',
-        r'\bstein\b': 'schtein',
-        r'\bStein\b': 'Schtein',
-        r'\bstehen\b': 'schtehen',
-        r'\bStehen\b': 'Schtehen',
-        r'\bsteht\b': 'schteht',
-        r'\bsteigen\b': 'schteigen',
-        r'\bstill\b': 'schtill',
-        r'\bStill\b': 'Schtill',
-        r'\bstreuen\b': 'schtreuen',
-        r'\bstreute\b': 'schtreute',
+        # r'\bSeestern\b': 'Seeschtern',
+        # r'\bstern\b': 'schtern',
+        # r'\bStern\b': 'Schtern',
+        # r'\bstein\b': 'schtein',
+        # r'\bStein\b': 'Schtein',
+        # r'\bstehen\b': 'schtehen',
+        # r'\bStehen\b': 'Schtehen',
+        # r'\bsteht\b': 'schteht',
+        # r'\bsteigen\b': 'schteigen',
+        # r'\bstill\b': 'schtill',
+        # r'\bStill\b': 'Schtill',
+        # r'\bstreuen\b': 'schtreuen',
+        # r'\bstreute\b': 'schtreute',
         
         # Words with "sp" that should sound like "schp"
-        r'\bspäter\b': 'schpäter',
-        r'\bSpäter\b': 'Schpäter',
-        r'\bspielen\b': 'schpielen',
-        r'\bSpielen\b': 'Schpielen',
-        r'\bspielt\b': 'schpielt',
-        r'\bsprechen\b': 'schprechen',
-        r'\bSprechen\b': 'Schprechen',
-        r'\bspricht\b': 'schpricht',
-        r'\bsprach\b': 'schprach',
+        # r'\bspäter\b': 'schpäter',
+        # r'\bSpäter\b': 'Schpäter',
+        # r'\bspielen\b': 'schpielen',
+        # r'\bSpielen\b': 'Schpielen',
+        # r'\bspielt\b': 'schpielt',
+        # r'\bsprechen\b': 'schprechen',
+        # r'\bSprechen\b': 'Schprechen',
+        # r'\bspricht\b': 'schpricht',
+        # r'\bsprach\b': 'schprach',
     }
     
     for pattern, replacement in replacements.items():
@@ -644,14 +647,13 @@ def stitch_chunks(audio_list, chunk_texts, pause_ms=100):
         # Determine specific pause based on punctuation
         current_pause = pause_ms
         if prev_text.endswith(('.', '!', '?')):
-            current_pause = 850  # Increased from 650: Longer pause for sentences (better storytelling pacing)
+            current_pause = 550  # Even tighter for English-like "perfect" flow
         elif prev_text.endswith((',', ';', ':')):
-            current_pause = 400  # Increased from 300: Clearer separation for clauses
+            current_pause = 220  # Tighter but distinct
         elif '\n' in prev_text:
-            current_pause = 1000  # Increased from 900: Paragraph break
+            current_pause = 750  # More natural paragraph transition
         else:
-            # Increased from 200 -> 300: Slower pacing between phrases/chunks to sound more thoughtful
-            current_pause = 300
+            current_pause = 120  # Fluid phrase connections
             
         pause_samples = int(SAMPLE_RATE * current_pause / 1000)
         
@@ -1282,14 +1284,24 @@ def generate_tts_handler(job):
         # Volume normalization parameter - default to True for backward compatibility
         normalize_volume = inp.get("normalize_volume", True)
 
-        # Tweak parameters to maximize voice fidelity and achieve naturally slower speech
-        # - Lower exaggeration (0.4): Makes speech calmer and naturally slower (less "rushed/excited")
-        # - Lower temperature (0.35): Makes model strictly adhere to the voice (less random variation)
-        # - Higher cfg_weight (0.95): Forces the model to try harder to copy the audio prompt style
-        exaggeration = float(inp.get("exaggeration", 0.4))
-        temperature = float(inp.get("temperature", 0.35))
-        cfg_weight = float(inp.get("cfg_weight", 0.95))
+        # Tweak parameters to maximize voice fidelity and achieve stable speech
+        # - Exaggeration (0.45): Balanced expressiveness
+        # - Temperature (0.60): High enough to avoid repetitions, low enough for "nearly perfect" English
+        # - CFG Weight (0.85): Restored to 0.85 for English to ensure maximum "storytelling" fidelity
+        exaggeration = float(inp.get("exaggeration", 0.45))
+        temperature = float(inp.get("temperature", 0.60))
+        cfg_weight = float(inp.get("cfg_weight", 0.85))
         
+        # Specific overrides for German to ensure "fidelity" without "artifacts"
+        if language == "de":
+            print(f"[tts] Applying German quality overrides: higher temperature for fluidity, lower exaggeration for R-control")
+            # Higher temperature (0.65+) is the best defense against rolling-r and repetition in German
+            temperature = max(temperature, 0.65)
+            # Lower exaggeration (0.35) prevents soft 'r' from being escalated into a harsh trill
+            exaggeration = min(exaggeration, 0.35)
+            # Keep CFG solid at 0.8 to ensure it sounds like the user voice
+            cfg_weight = 0.80
+
         # Speed parameter - default to 1.0 (normal) to avoid robotic artifacts.
         # We address "speaking too fast" by increasing pauses between sentences instead.
         speed = float(inp.get("speed", 1.0))
@@ -1297,7 +1309,7 @@ def generate_tts_handler(job):
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
         # model's early‑stopping heuristics.
-        max_chunk_chars = int(inp.get("max_chunk_chars", 180))
+        max_chunk_chars = int(inp.get("max_chunk_chars", 160)) # Slightly smaller chunks for better German stability
         pause_ms = int(inp.get("pause_ms", 100))  # Minimal pause for seamless transitions
 
         print(f"[tts] Text length: {len(text)}")
@@ -1376,10 +1388,9 @@ def generate_tts_handler(job):
                           f"exaggeration={base_exaggeration:.2f} (was {exaggeration:.2f})")
                     print(f"[tts] These parameters will be applied consistently to ALL chunks to ensure {language} accent")
             else:
-                # Languages match - use consistent parameters for all chunks to ensure accent consistency
-                # Lower temperature slightly to reduce variation and ensure consistent accent
-                base_temperature = temperature * 0.95  # Slight reduction for more consistency
-                print(f"[tts] Languages match - using consistent parameters for accent consistency across all chunks")
+                # Languages match - use original parameters for maximum fidelity to the voice
+                # No longer reducing temperature here, as it causesrepetitions and trills
+                print(f"[tts] Languages match - using optimized parameters for maximum voice fidelity")
                 print(f"[tts] Parameters: temp={base_temperature:.2f}, cfg={base_cfg_weight:.2f}, exaggeration={base_exaggeration:.2f}")
         
         # Use a consistent seed for ALL chunks to ensure accent consistency
