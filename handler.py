@@ -1295,12 +1295,26 @@ def generate_tts_handler(job):
         # Specific overrides for German to ensure "fidelity" without "artifacts"
         if language == "de":
             print(f"[tts] Applying German quality overrides: higher temperature for fluidity, lower exaggeration for R-control")
-            # Higher temperature (0.65+) is the best defense against rolling-r and repetition in German
-            temperature = max(temperature, 0.65)
-            # Lower exaggeration (0.35) prevents soft 'r' from being escalated into a harsh trill
-            exaggeration = min(exaggeration, 0.35)
-            # Keep CFG solid at 0.8 to ensure it sounds like the user voice
-            cfg_weight = 0.80
+            
+            # If we are using a German voice sample, we want maximum fidelity to its specific accent
+            # and R-pronunciation (the model defaults to a rolled 'r' which many users find unnatural)
+            if voice_language == "de":
+                # High CFG (0.90) is critical to ensure the user's specific 'r' pronunciation (rolled or not) is followed
+                # This ensures that if the sample DOES NOT roll the r, the generated audio won't either.
+                cfg_weight = 0.90
+                # Higher temperature (0.65+) is the best defense against rolling-r and phoneme repetition
+                temperature = max(temperature, 0.65)
+                # Significantly lower exaggeration (0.28) is the most effective way to stop the model from adding 
+                # its own "rolling r" artifact that isn't present in the sample.
+                exaggeration = min(exaggeration, 0.28)
+                print(f"[tts]   -> German voice detected: using High Fidelity mode (CFG=0.90, Exaggeration=0.28)")
+            else:
+                # English or other voice reading German: use model defaults with more aggressive "de-rolling" filter
+                # We keep the CFG lower so the model can apply its own German phonetic rules to the foreign voice
+                cfg_weight = 0.80
+                temperature = max(temperature, 0.70) 
+                exaggeration = min(exaggeration, 0.25)
+                print(f"[tts]   -> Non-German voice reading German: using Accent Control mode (CFG=0.80, Exaggeration=0.25)")
 
         # Speed parameter - default to 1.0 (normal) to avoid robotic artifacts.
         # We address "speaking too fast" by increasing pauses between sentences instead.
