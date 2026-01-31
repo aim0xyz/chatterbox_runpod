@@ -233,12 +233,14 @@ def get_user_dir(user_id):
     return d
 
 def find_voice(user_id=None, filename=None, preset=None):
+    print(f"[find_voice] Searching for: user_id={user_id}, filename={filename}, preset={preset}")
     if preset:
         # Preset can be either "Ruby" or "de/Ruby.mp3" (with language folder)
         # Try direct path first (handles both "de/Ruby.mp3" and "Ruby")
         for ext in ['', '.wav', '.mp3', '.flac']:
             p = PRESET_ROOT / f"{preset}{ext}"
             if p.exists():
+                print(f"[find_voice] ✅ Found preset at: {p}")
                 return p
         
         # Try without extension if path includes one
@@ -246,17 +248,24 @@ def find_voice(user_id=None, filename=None, preset=None):
         if preset_path.suffix:
             p = PRESET_ROOT / preset_path
             if p.exists():
+                print(f"[find_voice] ✅ Found preset at: {p}")
                 return p
         
         # Fallback: search recursively (slower but catches edge cases)
+        print(f"[find_voice] 🔍 Performing recursive search for: *{preset}* in {PRESET_ROOT}")
         for f in PRESET_ROOT.rglob(f"*{preset}*"):
             if f.is_file():
+                print(f"[find_voice] ✅ Found preset recursively at: {f}")
                 return f
+        
+        print(f"[find_voice] ❌ Preset not found in {PRESET_ROOT}")
     
     if user_id and filename:
         p = get_user_dir(user_id) / filename
         if p.exists():
+            print(f"[find_voice] ✅ Found user voice at: {p}")
             return p
+        print(f"[find_voice] ❌ User voice not found: {p}")
     
     return None
 
@@ -1336,7 +1345,14 @@ def generate_tts_handler(job):
 
         voice_path = find_voice(user_id, embedding_filename, preset_voice)
         if not voice_path:
-            return {"error": "Voice file not found"}
+            error_msg = f"Voice file not found for preset='{preset_voice}', user_id='{user_id}', filename='{embedding_filename}'"
+            print(f"[tts] ❌ ERROR: {error_msg}")
+            # List available presets to help debug
+            try:
+                available = [str(p.relative_to(PRESET_ROOT)) for p in PRESET_ROOT.rglob("*") if p.is_file() and not p.name.startswith(".")]
+                print(f"[tts] Available presets: {available[:20]}{'...' if len(available) > 20 else ''}")
+            except: pass
+            return {"error": error_msg}
 
         print(f"[tts] Voice: {voice_path}")
 
@@ -1426,9 +1442,11 @@ def generate_tts_handler(job):
         
         # Log the exact parameters that will be used for ALL chunks
         if model_type == "multilingual":
-            print(f"[tts] LOCKED parameters for ALL chunks: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}, language_id={language}")
+            print(f"[tts] LOCKED parameters for ALL chunks: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}, language_id={language}, speed={speed}x")
         else:
-            print(f"[tts] LOCKED parameters for ALL chunks: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}")
+            print(f"[tts] LOCKED parameters for ALL chunks: temp={final_temperature:.6f}, cfg={final_cfg_weight:.6f}, exaggeration={final_exaggeration:.6f}, speed={speed}x")
+        
+        print(f"[tts] Accent control status: preserve_voice_accent={preserve_voice_accent}, accent_control={accent_control:.2f}")
         
         audio_chunks = []
         

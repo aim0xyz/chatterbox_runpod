@@ -19,10 +19,14 @@ fi
 
 echo "[startup] Chatterbox path: $CHATTERBOX_PATH"
 
-ANALYZER_FILE="$CHATTERBOX_PATH/models/alignment_stream_analyzer.py"
-if [ -f "$ANALYZER_FILE" ]; then
+# Robustly find the files to patch
+ANALYZER_FILE=$(find "$CHATTERBOX_PATH" -name "alignment_stream_analyzer.py" | head -n 1)
+T3_FILE=$(find "$CHATTERBOX_PATH" -name "t3.py" | head -n 1)
+
+if [ -n "$ANALYZER_FILE" ] && [ -f "$ANALYZER_FILE" ]; then
     echo "[startup] Patching: $ANALYZER_FILE"
     cp "$ANALYZER_FILE" "${ANALYZER_FILE}.backup"
+    # Use | as delimiter for sed to avoid issues with paths
     sed -i 's/>=\s*2/>=50/g' "$ANALYZER_FILE"
     sed -i 's/==\s*2/==50/g' "$ANALYZER_FILE"
     sed -i 's/>\s*2/>50/g' "$ANALYZER_FILE"
@@ -30,18 +34,17 @@ if [ -f "$ANALYZER_FILE" ]; then
     sed -i 's/token_repetition=True/token_repetition=False/g' "$ANALYZER_FILE"
     echo "[startup] Patched alignment_stream_analyzer.py"
 else
-    echo "[startup] alignment_stream_analyzer.py not found"
+    echo "[startup] WARNING: alignment_stream_analyzer.py not found in $CHATTERBOX_PATH"
 fi
 
-T3_FILE="$CHATTERBOX_PATH/models/t3.py"
-if [ -f "$T3_FILE" ]; then
+if [ -n "$T3_FILE" ] && [ -f "$T3_FILE" ]; then
     echo "[startup] Patching: $T3_FILE"
     cp "$T3_FILE" "${T3_FILE}.backup"
     sed -i 's/token_repetition=True/token_repetition=False/g' "$T3_FILE"
     sed -i 's/>=\s*2/>=50/g' "$T3_FILE"
     echo "[startup] Patched t3.py"
 else
-    echo "[startup] t3.py not found"
+    echo "[startup] WARNING: t3.py not found in $CHATTERBOX_PATH"
 fi
 
 echo "============================================"
