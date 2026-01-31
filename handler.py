@@ -1316,9 +1316,8 @@ def generate_tts_handler(job):
                 exaggeration = min(exaggeration, 0.25)
                 print(f"[tts]   -> Non-German voice reading German: using Accent Control mode (CFG=0.80, Exaggeration=0.25)")
 
-        # Speed parameter - default to 1.0 (normal) to avoid robotic artifacts.
-        # We address "speaking too fast" by increasing pauses between sentences instead.
-        speed = float(inp.get("speed", 1.0))
+        # Speed parameter - default to 0.8 (~120 WPM) for a slower, clearer storytelling pace.
+        speed = float(inp.get("speed", 0.8))
 
         # Use character-based chunking (default ~180 chars) to keep each TTS call
         # reasonably short and avoid very long generations that can trigger the
@@ -1541,35 +1540,21 @@ def generate_tts_handler(job):
         if not audio_chunks:
             return {"error": "No audio generated"}
 
-        # Process audio chunks (Enhance -> Speed -> Trim)
-        # Doing this PER CHUNK is critical to avoid "huge gaps" caused by 
-        # enhancing stitched audio where artifacts become silence.
-        processed_chunks = []
-        
-        print(f"[tts] Processing {len(audio_chunks)} generated chunks...")
-        
-        for i, chunk in enumerate(audio_chunks):
-            wav_proc = chunk
-            
-            # 1. Enhance (if enabled)
-            # Remove artifacts/noise BEFORE stitching
-            if enhance_audio:
-                wav_proc = apply_resemble_enhance(wav_proc, sample_rate=SAMPLE_RATE)
-            
-            # 2. Trim Silence (Aggressive)
-            # This is CRITICAL: if enhance converted a "hallucination" at the end 
-            # into silence, we MUST trim it now, otherwise it becomes a "huge gap"
-            wav_proc = trim_trailing_silence(wav_proc, threshold_db=-40)
-            
-            # 3. Apply Speed Change
-            # Slow down if requested (e.g. for kids)
-            if abs(speed - 1.0) > 0.01:
-                wav_proc = change_speed(wav_proc, speed=speed, sample_rate=SAMPLE_RATE)
-            
-            processed_chunks.append(wav_proc)
+        # Process audio: Stitch -> Speed -> Enhance
+        # Stitching happens first. stitch_chunks already trims generation artifacts (trailing noise)
+        # from each chunk, which prevents the "huge gaps" issue.
+        print(f"[tts] Stitching {len(audio_chunks)} chunks...")
+        final_wav = stitch_chunks(audio_chunks, chunks, pause_ms=pause_ms)
 
-        # Stitch processed chunks
-        final_wav = stitch_chunks(processed_chunks, chunks, pause_ms=pause_ms)
+        # Apply Speed Change to the WHOLE audio (much faster than per-chunk due to FFmpeg overhead)
+        if abs(speed - 1.0) > 0.01 and len(final_wav) > 0:
+            print(f"[tts] Changing speed to {speed}x for the whole story...")
+            final_wav = change_speed(final_wav, speed=speed, sample_rate=SAMPLE_RATE)
+
+        # Apply Resemble Enhance to the WHOLE audio (more time-efficient than per-chunk)
+        if enhance_audio and len(final_wav) > 0:
+            print(f"[tts] ✨ Enhancing final audio in one step...")
+            final_wav = apply_resemble_enhance(final_wav, sample_rate=SAMPLE_RATE)
 
         # --- Apply comprehensive audio post-processing to reduce artifacts ---
         if len(final_wav) > 0:
