@@ -731,6 +731,17 @@ def apply_resemble_enhance(wav, sample_rate=24000):
         print(f"[enhance] Applying Resemble Enhance to {len(wav)} samples...")
         enhance_start = time.time()
         
+        # OPTIMIZATION: Use GPU for enhancement if available
+        # On Serverless, speed is key. Using GPU is much faster than CPU for this task.
+        use_cpu_for_enhance = False
+        
+        if use_cpu_for_enhance:
+            device = torch.device("cpu")
+            print(f"[enhance] Using CPU for enhancement (saves GPU for TTS generation)")
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"[enhance] Using {device} for enhancement")
+
         # Convert numpy array to torch tensor and MOVE TO GPU immediately
         # This allows resampling to happen on the GPU (much faster)
         wav_tensor = torch.from_numpy(wav).unsqueeze(0).float().to(device)
@@ -748,17 +759,6 @@ def apply_resemble_enhance(wav, sample_rate=24000):
         # Apply enhancement
         # denoise: removes background noise
         # enhance: improves clarity and removes artifacts
-        
-        # OPTIMIZATION: Use GPU for enhancement if available
-        # On Serverless, speed is key. Using GPU is much faster than CPU for this task.
-        use_cpu_for_enhance = False
-        
-        if use_cpu_for_enhance:
-            device = torch.device("cpu")
-            print(f"[enhance] Using CPU for enhancement (saves GPU for TTS generation)")
-        else:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"[enhance] Using {device} for enhancement")
         
         # wav_tensor is initially on CPU (from numpy)
         # We do NOT move it to GPU here explicitly. 
