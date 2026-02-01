@@ -756,6 +756,10 @@ def apply_resemble_enhance(wav, sample_rate=24000):
             ).to(device)
             wav_tensor = resampler(wav_tensor)
         
+        # Move back to CPU before passing to enhance(), as enhance() handles device placement
+        # and mixing passed GPU tensors with internal CPU scalars causes "devices mismatch" errors
+        wav_tensor = wav_tensor.cpu()
+        
         # Apply enhancement
         # denoise: removes background noise
         # enhance: improves clarity and removes artifacts
@@ -1394,16 +1398,16 @@ def generate_tts_handler(job):
                 elif accent_control > 0.0:
                     # Extremely aggressive adjustments for consistent target language accent across all chunks
                     # Higher temperature = more variation = less voice accent influence
-                    # With accent_control=1.0, maximize temperature to reduce voice accent as much as possible
-                    base_temperature = min(temperature + (accent_control * 0.5), 1.0)
+                    # Reduced cap to 0.85 to improve stability (1.0 can be too chaotic/unstable)
+                    base_temperature = min(temperature + (accent_control * 0.3), 0.85)
                     
                     # Lower cfg_weight = less voice embedding influence = more language model control
                     # With accent_control=1.0, minimize cfg_weight to absolute minimum to prioritize target language accent
-                    # Reduce by 80% to strongly favor language model over voice embedding (clamped to minimum 0.1)
-                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.8), 0.1)
+                    # Reduce by 80% to strongly favor language model over voice embedding (clamped to minimum 0.2)
+                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.8), 0.2)
                     
-                    # Reduce exaggeration more to make accent more consistent and prioritize target language
-                    base_exaggeration = exaggeration * (1.0 - accent_control * 0.2)
+                    # Reduce exaggeration significantly (40% reduction) to strip "English style" artifacts
+                    base_exaggeration = exaggeration * (1.0 - accent_control * 0.4)
                     
                     print(f"[tts] Accent control active (EXTREME strength for {language} accent): temp={base_temperature:.2f} (was {temperature:.2f}), "
                           f"cfg={base_cfg_weight:.2f} (was {cfg_weight:.2f}), "
@@ -1415,13 +1419,9 @@ def generate_tts_handler(job):
                 print(f"[tts] Languages match - using optimized parameters for maximum voice fidelity")
                 print(f"[tts] Parameters: temp={base_temperature:.2f}, cfg={base_cfg_weight:.2f}, exaggeration={base_exaggeration:.2f}")
         
-        # Use a consistent seed for ALL chunks to ensure accent consistency
-        # Different seeds per chunk can cause accent variation
-        consistent_seed = 42  # Fixed seed for maximum consistency
-        torch.manual_seed(consistent_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(consistent_seed)
-        print(f"[tts] Using consistent seed ({consistent_seed}) for all chunks to ensure accent consistency")
+        # Use a consistent seed logic
+        consistent_seed = 42 
+        print(f"[tts] Base seed: {consistent_seed}")
         
         # Store final parameters as constants to ensure they're never modified
         # These exact values will be used for EVERY chunk without any variation
@@ -1455,9 +1455,10 @@ def generate_tts_handler(job):
                 chunk_audio = None
                 
                 for attempt in range(max_retries):
-                    # Use consistent seed for base attempt to ensure accent consistency
-                    # For retries, vary seed slightly to avoid regenerating the exact same artifact
-                    current_seed = consistent_seed + attempt if attempt > 0 else consistent_seed
+                    # VARY SEED PER CHUNK:
+                    # Use (base + i) to ensure each chunk gets a fresh noise vector (avoids systematic "bad seed")
+                    # Add (+ attempt) for retries
+                    current_seed = consistent_seed + i + attempt
                     
                     torch.manual_seed(current_seed)
                     if torch.cuda.is_available():
