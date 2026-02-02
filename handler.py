@@ -1395,21 +1395,22 @@ def generate_tts_handler(job):
                     # No adjustments needed - let the voice embedding control the accent
                     print(f"[tts] Preserving voice accent: using original parameters to keep {voice_language} accent")
                     print(f"[tts] Parameters: temp={base_temperature:.2f}, cfg={base_cfg_weight:.2f}, exaggeration={base_exaggeration:.2f}")
-                elif accent_control > 0.0:
-                    # Extremely aggressive adjustments for consistent target language accent across all chunks
                     # Higher temperature = more variation = less voice accent influence
-                    # Reduced cap to 0.85 to improve stability (1.0 can be too chaotic/unstable)
-                    base_temperature = min(temperature + (accent_control * 0.3), 0.85)
+                    # STABILITY FIX: significantly REDUCED temperature cap to 0.5. 
+                    # High temps (0.8+) cause "weird sounds", static, and hallucinations in cross-lingual tasks.
+                    # Lower temp (0.3-0.5) is much more stable and reliable, even if slightly less "creative".
+                    base_temperature = min(temperature, 0.5)
                     
                     # Lower cfg_weight = less voice embedding influence = more language model control
-                    # With accent_control=1.0, minimize cfg_weight to absolute minimum to prioritize target language accent
-                    # Reduce by 80% to strongly favor language model over voice embedding (clamped to minimum 0.2)
-                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.8), 0.2)
+                    # STABILITY FIX: Increased minimum CFG to 0.4.
+                    # Extremely low CFG (0.2) causes the model to lose coherence and produce gibberish/silence.
+                    # 0.4 provides a better balance of "following the prompt" (structure) vs "ignoring the accent".
+                    base_cfg_weight = max(cfg_weight * (1.0 - accent_control * 0.6), 0.4)
                     
                     # Reduce exaggeration significantly (40% reduction) to strip "English style" artifacts
                     base_exaggeration = exaggeration * (1.0 - accent_control * 0.4)
                     
-                    print(f"[tts] Accent control active (EXTREME strength for {language} accent): temp={base_temperature:.2f} (was {temperature:.2f}), "
+                    print(f"[tts] Accent control active (STABLE strength for {language} accent): temp={base_temperature:.2f} (was {temperature:.2f}), "
                           f"cfg={base_cfg_weight:.2f} (was {cfg_weight:.2f}), "
                           f"exaggeration={base_exaggeration:.2f} (was {exaggeration:.2f})")
                     print(f"[tts] These parameters will be applied consistently to ALL chunks to ensure {language} accent")
