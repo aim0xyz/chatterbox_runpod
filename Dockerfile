@@ -16,6 +16,8 @@ RUN apt-get update && \
     git \
     git-lfs \
     ffmpeg \
+    sox \
+    libsox-dev \
     libsndfile1 \
     curl \
     build-essential && \
@@ -42,6 +44,7 @@ RUN pip install --no-cache-dir qwen-tts
 RUN python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='Qwen/Qwen3-TTS-12Hz-1.7B-Base', filename='config.json')" || echo "Pre-download skipped"
 
 # Copy the rest of the application code
+COPY download_models.py .
 COPY handler.py .
 COPY start.sh .
 

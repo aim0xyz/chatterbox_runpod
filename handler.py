@@ -27,11 +27,15 @@ def init_model():
     print("[startup] Loading Qwen3-TTS model from local directory...")
     
     try:
-        from qwen_tts import QwenTTS
+        from qwen_tts import Qwen3TTSModel
         
-        # Load model from the local 'model' directory
-        # (Assuming it's symlinked or moved to MODEL_PATH on the server)
-        model = QwenTTS(str(MODEL_PATH))
+        # Load model using the official Qwen3TTSModel wrapper
+        # We pass torch_dtype=torch.bfloat16 for efficiency on modern GPUs
+        model = Qwen3TTSModel.from_pretrained(
+            str(MODEL_PATH),
+            torch_dtype=torch.bfloat16,
+            device_map="auto"
+        )
         print("[startup] Model loaded successfully!")
         
     except Exception as e:
@@ -127,17 +131,19 @@ def generate_tts_handler(job):
              return {"error": "Model not loaded"}
              
         # CALL QWEN3-TTS
-        # Official signature: model.generate(text, audio_prompt_path, language_id, temperature, top_p)
-        audio_array = model.generate(
+        # Official signature: model.generate_voice_clone(text, language, ref_audio, ...)
+        # We use x_vector_only_mode=True as we don't always have the reference text for prompts
+        wavs, sample_rate = model.generate_voice_clone(
             text=text,
-            audio_prompt_path=str(voice_path),
-            language_id=language,
+            language=language,
+            ref_audio=str(voice_path),
+            x_vector_only_mode=True,
             temperature=temperature,
             top_p=top_p
         )
         
-        # Qwen3 usually returns 24kHz or 12Hz tokens decoded to 24kHz
-        sample_rate = 24000 
+        # Qwen3 returns a list of numpy arrays, pick the first one
+        audio_array = wavs[0]
         
         buffer = io.BytesIO()
         sf.write(buffer, audio_array, sample_rate, format='WAV')
