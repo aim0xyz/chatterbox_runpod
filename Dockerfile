@@ -1,25 +1,26 @@
-# Use an official Python runtime as a parent image
-FROM python:3.10-slim
+# Use a stable Debian-based Python image (Bookworm is more stable than Slim for complex builds)
+FROM python:3.10-bookworm
 
 # Set the working directory in the container
 WORKDIR /app
 
-# Set environment variables for Hugging Face and RunPod persistence
+# Prevent interactive prompts during build
+ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME="/runpod-volume/.cache/huggingface"
 ENV TRANSFORMERS_CACHE="/runpod-volume/.cache/huggingface/transformers"
 ENV PYTHONPATH="/app"
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     git \
     git-lfs \
     ffmpeg \
     libsndfile1 \
-    libsndfile1-dev \
     curl \
-    build-essential \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install PyTorch with CUDA support (Optimized for RunPod GPUs)
 RUN pip install --no-cache-dir \
