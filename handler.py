@@ -30,10 +30,10 @@ def init_model():
         from qwen_tts import Qwen3TTSModel
         
         # Load model using the official Qwen3TTSModel wrapper
-        # We pass torch_dtype=torch.bfloat16 for efficiency on modern GPUs
+        # We pass dtype=torch.bfloat16 for efficiency on modern GPUs
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_PATH),
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto"
         )
         print("[startup] Model loaded successfully!")
