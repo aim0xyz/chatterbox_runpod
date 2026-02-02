@@ -1,0 +1,11 @@
+runpod==1.6.0
+torch>=2.2.0
+torchaudio>=2.2.0
+numpy
+scipy
+transformers>=4.40.0
+accelerate
+huggingface_hub
+soundfile
+pydub
+qwen-tts
