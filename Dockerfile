@@ -8,9 +8,6 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME="/runpod-volume/.cache/huggingface"
 ENV PYTHONPATH="/app"
-# Optimize Flash Attention build
-ENV MAX_JOBS=4
-ENV FLASH_ATTENTION_FORCE_BUILD=TRUE
 
 # Install Python and core system dependencies
 RUN apt-get update && \
@@ -44,9 +41,8 @@ RUN python3 -m pip install --no-cache-dir \
     torchaudio>=2.2.0 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# 2. Install Flash Attention (Standalone step with no-build-isolation)
-# This ensures it uses the Torch we JUST installed.
-RUN python3 -m pip install flash-attn --no-build-isolation
+# 2. Install Flash Attention (Using pre-compiled wheels if available)
+RUN python3 -m pip install flash-attn --no-cache-dir
 
 # 3. Copy and install the rest of requirements
 COPY requirements.txt .
