@@ -246,29 +246,39 @@ def generate_tts_handler(job):
         if model is None:
              return {"error": "Model not loaded"}
 
-        for i, chunk in enumerate(text_chunks):
-            # Log progress for UI
-            progress_pct = int((i / len(text_chunks)) * 90)
-            log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
-            
-            # Generate this specific chunk
-            # Parameters optimized for high-quality cloning
-            wavs, sample_rate = model.generate_voice_clone(
-                text=chunk,
-                language=language,
-                ref_audio=str(voice_path),
-                temperature=temperature,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                top_k=top_k,
-                x_vector_only_mode=True
-            )
-            sr = sample_rate
-            all_audio.append(wavs[0])
-            
-            # Add 400ms silence between sentences for natural storyteller rhythm
-            silence = np.zeros(int(0.4 * sr))
-            all_audio.append(silence)
+        model.eval()
+        with torch.inference_mode():
+            for i, chunk in enumerate(text_chunks):
+                # Log progress for UI
+                progress_pct = int((i / len(text_chunks)) * 90)
+                log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
+                
+                chunk_start = time.time()
+                # LIMIT tokens based on text length to prevent slow hallucinations
+                limit = int(len(chunk) * 2.1) + 60
+                
+                # Generate this specific chunk
+                wavs, sample_rate = model.generate_voice_clone(
+                    text=chunk,
+                    language=language,
+                    ref_audio=str(voice_path),
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    top_k=top_k,
+                    x_vector_only_mode=True,
+                    max_new_tokens=limit
+                )
+                
+                dt = time.time() - chunk_start
+                print(f"[TTS] Chunk {i+1} done in {dt:.2f}s | Limit: {limit}")
+                
+                sr = sample_rate
+                all_audio.append(wavs[0])
+                
+                # Add 400ms silence for natural rhythm
+                silence = np.zeros(int(0.4 * sr))
+                all_audio.append(silence)
             
         # Combine pieces
         final_audio = np.concatenate(all_audio)
