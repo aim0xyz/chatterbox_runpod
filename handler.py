@@ -183,8 +183,33 @@ def generate_tts_handler(job):
     if not voice_path:
         return {"error": f"Voice not found: {preset_voice or voice_id}"}
 
+    # --- CUDA OPTIMIZATIONS ---
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        print("[startup] CUDA optimizations (benchmark=True) enabled")
+
+    # --- STORYTELLER VIBE: Natural Pause Injection ---
+    # To prevent 'rushing' between sentences, we add breathing room.
+    # We replace standard punctuation with versions that the model interprets as pauses.
+    print(f"[storyteller] Enhancing text for better rhythm and pauses...")
+    text = text.replace(". ", "... ") \
+               .replace("! ", "!!! ") \
+               .replace("? ", "?? ") \
+               .replace("\n\n", ".\n\n[pause]\n\n") \
+               .strip()
+    
+    # --- CONCLUDING INTONATION FIX ---
+    # Add extra punctuation at the very end to signal a definitive wrap-up.
+    # This forces the pitch to drop and adds a natural final silence.
+    print(f"[storyteller] Adding concluding intonation...")
+    if text.endswith(".") or text.endswith("!") or text.endswith("?"):
+        text = text + "....  "
+    else:
+        text = text + "....  "
+
     # --- THE STITCHER: SMART CHUNKING ---
-    def split_into_chunks(t, max_chars=400):
+    def split_into_chunks(t, max_chars=250): # Reduced from 400 for 8s target
         # Split by sentence markers but keep punctuation
         sentences = re.split('(?<=[.!?]) +', t)
         chunks = []
