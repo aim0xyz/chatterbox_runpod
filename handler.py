@@ -161,13 +161,13 @@ def generate_tts_handler(job):
     preset_voice = inp.get("preset_voice")
     voice_id = inp.get("voice_id") or inp.get("embedding_filename")
     
-    # Generation parameters (optimized for voice fidelity + storytelling)
-    # Lower temperature = more consistent voice matching
-    # Higher temperature = more expressive but may drift from original voice
-    temperature = float(inp.get("temperature", 0.65))  # Conservative for voice fidelity
-    top_p = float(inp.get("top_p", 0.8))               # Natural variation
-    repetition_penalty = float(inp.get("repetition_penalty", 1.05))  # Prevents monotony
-    top_k = int(inp.get("top_k", 35))                  # Balanced token selection
+    # Generation parameters (optimized for natural, expressive storytelling)
+    # Higher temperature = more expressive and natural sounding
+    # Higher top_p = more diversity in prosody and intonation
+    temperature = float(inp.get("temperature", 0.85))  # More expressive (was 0.65)
+    top_p = float(inp.get("top_p", 0.9))               # More natural variation (was 0.8)
+    repetition_penalty = float(inp.get("repetition_penalty", 1.02))  # Gentler, more natural (was 1.05)
+    top_k = int(inp.get("top_k", 50))                  # Richer voice variation (was 35)
     
     # High default for long stories (8192 tokens ≈ 10 minutes of reading)
     max_new_tokens = int(inp.get("max_new_tokens", 8192))
