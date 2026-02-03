@@ -41,8 +41,9 @@ RUN python3 -m pip install --no-cache-dir \
     torchaudio>=2.2.0 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# 2. Install Flash Attention (Using pre-compiled wheels if available)
-RUN python3 -m pip install flash-attn --no-cache-dir
+# 2. Install Flash Attention (Using pre-compiled binaries to avoid 30-min timeout)
+# We point to the official CUDA 12.1 wheels
+RUN python3 -m pip install flash-attn --no-cache-dir --find-links https://github.com/Dao-AILab/flash-attention/releases/latest
 
 # 3. Copy and install the rest of requirements
 COPY requirements.txt .
