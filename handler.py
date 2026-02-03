@@ -69,8 +69,14 @@ def init_model():
         if hasattr(model, 'tokenizer') and model.tokenizer is not None:
             model.tokenizer.padding_side = 'left'
             model.tokenizer.pad_token = model.tokenizer.eos_token
-            
-        print("[startup] Model loaded successfully!")
+        
+        # Compile model for 15-30% faster inference
+        print("[startup] Compiling model with torch.compile()...")
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
+        model = torch.compile(model, mode="reduce-overhead")
+        
+        print("[startup] Model loaded and compiled successfully!")
     except Exception as e:
         print(f"[startup] Error loading model: {e}")
 
@@ -161,16 +167,18 @@ def generate_tts_handler(job):
     preset_voice = inp.get("preset_voice")
     voice_id = inp.get("voice_id") or inp.get("embedding_filename")
     
-    # Generation parameters (optimized for natural, expressive storytelling)
-    # Higher temperature = more expressive and natural sounding
+    # Generation parameters (optimized for dynamic, expressive storytelling)
+    # Higher temperature = more dramatic and exaggerated delivery
     # Higher top_p = more diversity in prosody and intonation
-    temperature = float(inp.get("temperature", 0.85))  # More expressive (was 0.65)
-    top_p = float(inp.get("top_p", 0.9))               # More natural variation (was 0.8)
-    repetition_penalty = float(inp.get("repetition_penalty", 1.02))  # Gentler, more natural (was 1.05)
-    top_k = int(inp.get("top_k", 50))                  # Richer voice variation (was 35)
+    # Lower repetition_penalty = more natural flow, prevents monotone sentence endings
+    temperature = float(inp.get("temperature", 0.95))  # Very expressive and dynamic (was 0.85)
+    top_p = float(inp.get("top_p", 0.92))              # High variation in prosody (was 0.9)
+    repetition_penalty = float(inp.get("repetition_penalty", 1.0))  # Natural flow, no penalty (was 1.02)
+    top_k = int(inp.get("top_k", 60))                  # Maximum voice variation (was 50)
     
-    # High default for long stories (8192 tokens ≈ 10 minutes of reading)
-    max_new_tokens = int(inp.get("max_new_tokens", 8192))
+    # Optimized for typical stories (4096 tokens ≈ 5 minutes of audio)
+    # Set higher in request for very long stories
+    max_new_tokens = int(inp.get("max_new_tokens", 4096))
     
     if not text:
         return {"error": "No text provided"}
@@ -180,8 +188,30 @@ def generate_tts_handler(job):
     if not voice_path:
         return {"error": f"Voice not found: {preset_voice or voice_id}"}
         
-    print(f"[TTS] Generating for user={user_id}, lang={language} (from {lang_code}), voice={voice_path}")
+    print(f"\n{'='*60}")
+    print(f"[TTS] 🎙️  STARTING TTS GENERATION")
+    print(f"[TTS] User: {user_id}")
+    print(f"[TTS] Language: {language} ({lang_code})")
+    print(f"[TTS] Voice: {voice_path}")
+    print(f"[TTS] Text length: {len(text)} chars")
     print(f"[TTS] Parameters: temp={temperature}, top_p={top_p}, rep_penalty={repetition_penalty}, top_k={top_k}")
+    print(f"{'='*60}\n")
+    
+    start_time = time.time()
+    progress_log = []  # Track progress for frontend
+    
+    def log_progress(step: str, progress: int, message: str, **extra):
+        """Helper to log progress both to console and tracking list"""
+        elapsed = time.time() - start_time
+        entry = {
+            "step": step,
+            "progress": progress,
+            "message": message,
+            "elapsed_seconds": round(elapsed, 2),
+            **extra
+        }
+        progress_log.append(entry)
+        print(f"[Progress] {progress}% - {message}")
     
     try:
         if not model:
@@ -200,6 +230,7 @@ def generate_tts_handler(job):
             "max_new_tokens": max_new_tokens,  # Always set for long stories
         }
         
+        log_progress("init", 0, "Initializing generation...")
         wavs, sample_rate = model.generate_voice_clone(
             text=text,
             language=language,
@@ -207,22 +238,57 @@ def generate_tts_handler(job):
             x_vector_only_mode=True,
             **gen_kwargs  # Pass all generation parameters
         )
+        log_progress("generate", 90, "Audio generated!")
         
         # Qwen3 returns a list of numpy arrays, pick the first one
         audio_array = wavs[0]
+        duration = len(audio_array) / sample_rate
         print(f"[TTS] Generated audio shape: {audio_array.shape}, sample_rate: {sample_rate}")
+        print(f"[TTS] Audio duration: {duration:.2f} seconds")
         
-        buffer = io.BytesIO()
-        sf.write(buffer, audio_array, sample_rate, format='WAV')
-        buffer.seek(0)
-        b64_audio = base64.b64encode(buffer.read()).decode('utf-8')
-        print(f"[TTS] Encoded audio size: {len(b64_audio)} bytes")
+        # Convert to MP3 for smaller file size (10x reduction vs WAV)
+        # First write to WAV in memory
+        wav_buffer = io.BytesIO()
+        sf.write(wav_buffer, audio_array, sample_rate, format='WAV')
+        wav_buffer.seek(0)
+        log_progress("convert", 92, "Converting to MP3...")
+        
+        # Convert WAV to MP3 using pydub
+        from pydub import AudioSegment
+        audio_segment = AudioSegment.from_wav(wav_buffer)
+        
+        mp3_buffer = io.BytesIO()
+        audio_segment.export(mp3_buffer, format='mp3', bitrate='128k')
+        mp3_buffer.seek(0)
+        log_progress("encode", 95, "Encoding to base64...")
+        
+        b64_audio = base64.b64encode(mp3_buffer.read()).decode('utf-8')
+        total_time = time.time() - start_time
+        throughput = duration / total_time if total_time > 0 else 0
+        
+        print(f"[TTS] Encoded MP3 size: {len(b64_audio)} bytes (WAV would be ~{len(b64_audio)*10} bytes)")
+        print(f"\n{'='*60}")
+        print(f"[Progress] ✅ 100% - COMPLETE! Total time: {total_time:.2f}s")
+        print(f"[TTS] Throughput: {throughput:.2f}x realtime")
+        print(f"{'='*60}\n")
+        
+        log_progress("complete", 100, "Complete!", 
+                    total_time=round(total_time, 2),
+                    audio_duration=round(duration, 2),
+                    throughput=round(throughput, 2))
         
         return {
             "status": "success",
             "audio": b64_audio,
             "sample_rate": sample_rate,
-            "format": "wav"
+            "format": "mp3",
+            "progress_log": progress_log,  # Include progress timeline
+            "stats": {
+                "total_time_seconds": round(total_time, 2),
+                "audio_duration_seconds": round(duration, 2),
+                "throughput_realtime": round(throughput, 2),
+                "file_size_bytes": len(b64_audio)
+            }
         }
         
     except Exception as e:
