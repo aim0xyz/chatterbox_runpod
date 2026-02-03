@@ -21,17 +21,20 @@ VOICE_ROOT = Path("/runpod-volume/user_voices")
 PRESET_ROOT = Path("/runpod-volume/preset_voices")
 
 # --- SMART PATH DISCOVERY ---
-# 1. Try path discovered by start.sh
-if Path("/tmp/model_path.txt").exists():
+# PREFER the 0.6B model baked into the image for maximum speed
+if (Path("/qwen3_models") / "model.safetensors").exists():
+    MODEL_PATH = Path("/qwen3_models")
+    print(f"[startup] Using FAST 0.6B Image Model: {MODEL_PATH}")
+# FALLBACK 1: Path discovered by start.sh
+elif Path("/tmp/model_path.txt").exists():
     with open("/tmp/model_path.txt", "r") as f:
         discovered = Path(f.read().strip())
         if (discovered / "model.safetensors").exists():
             MODEL_PATH = discovered
             print(f"[startup] Path set from search: {MODEL_PATH}")
-
-# 2. Fallback recursive search if still not found
-if not (MODEL_PATH / "model.safetensors").exists():
-    print("[startup] Model not in default path, searching common root /runpod-volume...")
+# FALLBACK 2: Search volume
+elif not (MODEL_PATH / "model.safetensors").exists():
+    print("[startup] Searching volume root /runpod-volume...")
     for path in Path("/runpod-volume").rglob("model.safetensors"):
         if "speech_tokenizer" not in str(path):
             MODEL_PATH = path.parent
@@ -69,7 +72,8 @@ def init_model():
             str(MODEL_PATH),
             dtype=torch.bfloat16,
             device_map={"": 0},
-            trust_remote_code=True
+            trust_remote_code=True,
+            attn_implementation="flash_attention_2" # FORCE super-speed mode
         )
         
         # Configure tokenizer padding
@@ -216,6 +220,16 @@ def generate_tts_handler(job):
         entry = {"step": step, "progress": progress, "message": message, "elapsed_seconds": round(elapsed, 2), **extra}
         progress_log.append(entry)
         print(f"[Progress] {progress}% - {message}")
+
+    # --- CUDA OPTIMIZATIONS ---
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        print("[startup] CUDA optimizations enabled")
+
+    # --- NO-GRAD INFERENCE ---
+    # Safer than model.eval() for wrappers, tells torch to stop tracking math for speed
+    torch.set_grad_enabled(False)
 
     try:
         if model is None:
