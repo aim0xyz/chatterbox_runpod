@@ -156,164 +156,124 @@ def save_base64_audio(b64_data, dest_path):
 # HANDLERS
 # ==========================================
 def generate_tts_handler(job):
-    """Handle text-to-speech request."""
+    """Handle text-to-speech request with smart chunking."""
     inp = job["input"]
     text = inp.get("text")
     lang_code = inp.get("language", "en") # 'en', 'de', etc.
-    
-    # Translate language code to full name (e.g. 'de' -> 'german')
-    language = LANG_MAP.get(lang_code.lower(), "auto")
-    
     user_id = inp.get("user_id")
     preset_voice = inp.get("preset_voice")
     voice_id = inp.get("voice_id") or inp.get("embedding_filename")
     
-    # --- HIFI VOICE CLONING & STABILITY ---
-    # To sound 'exactly like the sample', we reset repetition_penalty to 1.0. 
-    # To fix rushing, we lower temperature slightly more.
-    temperature = float(inp.get("temperature", 0.8))  # Cooler = more stable, less rushing
-    top_p = float(inp.get("top_p", 0.95))              # Higher = more of the sample's character
-    repetition_penalty = float(inp.get("repetition_penalty", 1.0)) # 1.0 = Purest clone (no distortion)
-    top_k = int(inp.get("top_k", 70))                  # More variation for natural feel
+    # Translate language code to full name (e.g. 'de' -> 'german')
+    language = LANG_MAP.get(lang_code.lower(), "auto")
+    
+    # --- VOICE SETTINGS ---
+    temperature = float(inp.get("temperature", 0.75)) 
+    top_p = float(inp.get("top_p", 0.95))             
+    repetition_penalty = float(inp.get("repetition_penalty", 1.05)) 
+    top_k = int(inp.get("top_k", 75))
     
     if not text:
         return {"error": "No text provided"}
 
-    # --- STORYTELLER RHYTHM: Forced Newline Pauses ---
-    # Dots can be ignored, but consecutive newlines force the model to 'breathe'.
-    print(f"[storyteller] Adding structural pauses for rhythm...")
-    # Add a mandatory newline after every sentence to force a pause
-    enhanced_text = text.replace(". ", ".\n\n") \
-                       .replace("! ", "!\n\n") \
-                       .replace("? ", "?\n\n")
-    
-    # --- CONCLUDING INTONATION ---
-    # Add a final 'End of Story' breathe
-    enhanced_text = enhanced_text.strip() + "\n\n\n.  "
-    
-    # Use the enhanced text
-    original_text = text
-    text = enhanced_text
-
-    
-    # Smart token calculation (use original length for base, enhanced for limit)
-    estimated_tokens = int(len(original_text) * 1.5)  # ~1.5 tokens per char
-    buffer_tokens = int(estimated_tokens * 0.1)  # 10% buffer
-    calculated_max_tokens = estimated_tokens + buffer_tokens
-    
-    # Override with manual setting if provided, otherwise use calculated value
-    # Clamp between 512 and 8192 for safety
-    max_new_tokens = int(inp.get("max_new_tokens", calculated_max_tokens))
-    max_new_tokens = max(512, min(max_new_tokens, 8192))
-    
-    print(f"[TTS] Text length: {len(text)} chars")
-    print(f"[TTS] Calculated max_new_tokens: {calculated_max_tokens} (using: {max_new_tokens})")
-    
-    # Find prompt audio for zero-shot cloning
+    # Find prompt audio
     voice_path = find_voice(user_id=user_id, voice_id=voice_id, preset=preset_voice)
     if not voice_path:
         return {"error": f"Voice not found: {preset_voice or voice_id}"}
-        
+
+    # --- THE STITCHER: SMART CHUNKING ---
+    def split_into_chunks(t, max_chars=400):
+        # Split by sentence markers but keep punctuation
+        sentences = re.split('(?<=[.!?]) +', t)
+        chunks = []
+        current_chunk = ""
+        for s in sentences:
+            if len(current_chunk) + len(s) < max_chars:
+                current_chunk += " " + s
+            else:
+                if current_chunk: chunks.append(current_chunk.strip())
+                current_chunk = s
+        if current_chunk: chunks.append(current_chunk.strip())
+        return chunks
+
+    text_chunks = split_into_chunks(text)
+    
     print(f"\n{'='*60}")
-    print(f"[TTS] 🎙️  STARTING TTS GENERATION")
-    print(f"[TTS] User: {user_id}")
-    print(f"[TTS] Language: {language} ({lang_code})")
-    print(f"[TTS] Voice: {voice_path}")
-    print(f"[TTS] Text length: {len(text)} chars")
-    print(f"[TTS] Parameters: temp={temperature}, top_p={top_p}, rep_penalty={repetition_penalty}, top_k={top_k}")
+    print(f"[TTS] 🎙️  STARTING CHUNKED GENERATION")
+    print(f"[TTS] Processing {len(text_chunks)} chunks for {len(text)} chars...")
+    print(f"[TTS] Language: {language} | Voice: {voice_path}")
     print(f"{'='*60}\n")
     
     start_time = time.time()
-    progress_log = []  # Track progress for frontend
+    all_audio = []
+    sr = 24000
+    progress_log = []
     
     def log_progress(step: str, progress: int, message: str, **extra):
-        """Helper to log progress both to console and tracking list"""
         elapsed = time.time() - start_time
-        entry = {
-            "step": step,
-            "progress": progress,
-            "message": message,
-            "elapsed_seconds": round(elapsed, 2),
-            **extra
-        }
+        entry = {"step": step, "progress": progress, "message": message, "elapsed_seconds": round(elapsed, 2), **extra}
         progress_log.append(entry)
         print(f"[Progress] {progress}% - {message}")
-    
+
     try:
-        if not model:
+        if model is None:
              return {"error": "Model not loaded"}
-             
-        # CALL QWEN3-TTS
-        # Official signature: model.generate_voice_clone(text, language, ref_audio, ...)
-        # We use x_vector_only_mode=True as we don't always have the reference text for prompts
+
+        for i, chunk in enumerate(text_chunks):
+            # Log progress for UI
+            progress_pct = int((i / len(text_chunks)) * 90)
+            log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
+            
+            # Generate this specific chunk
+            # Parameters optimized for high-quality cloning
+            wavs, sample_rate = model.generate_voice_clone(
+                text=chunk,
+                language=language,
+                ref_audio=str(voice_path),
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                top_k=top_k,
+                x_vector_only_mode=True
+            )
+            sr = sample_rate
+            all_audio.append(wavs[0])
+            
+            # Add 400ms silence between sentences for natural storyteller rhythm
+            silence = np.zeros(int(0.4 * sr))
+            all_audio.append(silence)
+            
+        # Combine pieces
+        final_audio = np.concatenate(all_audio)
+        duration = len(final_audio) / sr
         
-        # Build generation kwargs
-        gen_kwargs = {
-            "temperature": temperature,
-            "top_p": top_p,
-            "repetition_penalty": repetition_penalty,
-            "top_k": top_k,
-            "max_new_tokens": max_new_tokens,  # Always set for long stories
-        }
+        # 3. Encoding to MP3
+        log_progress("convert", 92, "Finishing story audio...")
         
-        log_progress("init", 0, "Initializing generation...")
-        wavs, sample_rate = model.generate_voice_clone(
-            text=text,
-            language=language,
-            ref_audio=str(voice_path),
-            x_vector_only_mode=True,
-            **gen_kwargs  # Pass all generation parameters
-        )
-        log_progress("generate", 90, "Audio generated!")
+        wav_io = io.BytesIO()
+        sf.write(wav_io, final_audio, sr, format='WAV')
+        wav_io.seek(0)
         
-        # Qwen3 returns a list of numpy arrays, pick the first one
-        audio_array = wavs[0]
-        duration = len(audio_array) / sample_rate
-        print(f"[TTS] Generated audio shape: {audio_array.shape}, sample_rate: {sample_rate}")
-        print(f"[TTS] Audio duration: {duration:.2f} seconds")
+        audio_segment = AudioSegment.from_wav(wav_io)
+        mp3_io = io.BytesIO()
+        audio_segment.export(mp3_io, format="mp3", bitrate="192k")
+        b64_audio = base64.b64encode(mp3_io.getvalue()).decode('utf-8')
         
-        # Convert to MP3 for smaller file size (10x reduction vs WAV)
-        # First write to WAV in memory
-        wav_buffer = io.BytesIO()
-        sf.write(wav_buffer, audio_array, sample_rate, format='WAV')
-        wav_buffer.seek(0)
-        log_progress("convert", 92, "Converting to MP3...")
-        
-        # Convert WAV to MP3 using pydub
-        from pydub import AudioSegment
-        audio_segment = AudioSegment.from_wav(wav_buffer)
-        
-        mp3_buffer = io.BytesIO()
-        audio_segment.export(mp3_buffer, format='mp3', bitrate='128k')
-        mp3_buffer.seek(0)
-        log_progress("encode", 95, "Encoding to base64...")
-        
-        b64_audio = base64.b64encode(mp3_buffer.read()).decode('utf-8')
         total_time = time.time() - start_time
         throughput = duration / total_time if total_time > 0 else 0
         
-        print(f"[TTS] Encoded MP3 size: {len(b64_audio)} bytes (WAV would be ~{len(b64_audio)*10} bytes)")
-        print(f"\n{'='*60}")
-        print(f"[Progress] ✅ 100% - COMPLETE! Total time: {total_time:.2f}s")
-        print(f"[TTS] Throughput: {throughput:.2f}x realtime")
-        print(f"{'='*60}\n")
-        
-        log_progress("complete", 100, "Complete!", 
-                    total_time=round(total_time, 2),
-                    audio_duration=round(duration, 2),
-                    throughput=round(throughput, 2))
+        log_progress("complete", 100, "Complete!", total_time=round(total_time, 2), duration=round(duration, 2))
         
         return {
             "status": "success",
             "audio": b64_audio,
-            "sample_rate": sample_rate,
+            "sample_rate": sr,
             "format": "mp3",
-            "progress_log": progress_log,  # Include progress timeline
+            "progress_log": progress_log,
             "stats": {
                 "total_time_seconds": round(total_time, 2),
                 "audio_duration_seconds": round(duration, 2),
-                "throughput_realtime": round(throughput, 2),
-                "file_size_bytes": len(b64_audio)
+                "throughput_realtime": round(throughput, 2)
             }
         }
         
