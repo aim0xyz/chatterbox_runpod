@@ -11,17 +11,22 @@ cd /app || exit 1
 # We use /app/requirements.txt specifically
 pip install --no-cache-dir -r /app/requirements.txt
 
-# 2. Check if model exists & Debug Paths
-echo "[debug] Contents of /qwen3_models:"
-ls -F /qwen3_models
-if [ -d "/qwen3_models/qwen3_models" ]; then
-    echo "[debug] Contents of /qwen3_models/qwen3_models:"
-    ls -F /qwen3_models/qwen3_models
-fi
+# 2. Comprehensive Model Search
+echo "[debug] --- System Path Search ---"
+echo "[debug] Checking root /qwen3_models:"
+ls -F /qwen3_models 2>/dev/null || echo "Folder /qwen3_models does not exist"
 
-if [ ! -f "/qwen3_models/model.safetensors" ] && [ ! -f "/qwen3_models/qwen3_models/model.safetensors" ]; then
-    echo "[ERROR] Model files (model.safetensors) not found!"
-    echo "Please check the [debug] logs above to see where the files went."
+echo "[debug] Checking /runpod-volume:"
+ls -F /runpod-volume 2>/dev/null || echo "Folder /runpod-volume does not exist"
+
+echo "[debug] Searching for model.safetensors across all drives..."
+find / -name "model.safetensors" 2>/dev/null | xargs dirname | head -n 1 > /tmp/model_path.txt
+FOUND_PATH=$(cat /tmp/model_path.txt)
+
+if [ -n "$FOUND_PATH" ]; then
+    echo "[debug] FOUND MODEL AT: $FOUND_PATH"
+else
+    echo "[ERROR] model.safetensors NOT FOUND ANYWHERE ON THE SERVER!"
 fi
 
 # 3. Start the RunPod handler

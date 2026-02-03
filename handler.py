@@ -13,24 +13,26 @@ from pathlib import Path
 # ==========================================
 # Model and Voice Paths
 MODEL_PATH = Path("/qwen3_models")
-
-# Recursive search for the actual model directory
-def find_model_dir(root_path):
-    # Search for all model.safetensors, but skip the speech_tokenizer one
-    for path in Path(root_path).rglob("model.safetensors"):
-        if "speech_tokenizer" not in str(path):
-            return path.parent
-    # Fallback if only the tokenizer one exists for some reason
-    for path in Path(root_path).rglob("model.safetensors"):
-        return path.parent
-    return Path(root_path)
-
-REAL_MODEL_PATH = find_model_dir(MODEL_PATH)
-if REAL_MODEL_PATH != MODEL_PATH:
-    print(f"[startup] Path adjusted: Model found at {REAL_MODEL_PATH}")
-    MODEL_PATH = REAL_MODEL_PATH
 VOICE_ROOT = Path("/runpod-volume/user_voices")
 PRESET_ROOT = Path("/runpod-volume/preset_voices")
+
+# --- SMART PATH DISCOVERY ---
+# 1. Try path discovered by start.sh
+if Path("/tmp/model_path.txt").exists():
+    with open("/tmp/model_path.txt", "r") as f:
+        discovered = Path(f.read().strip())
+        if (discovered / "model.safetensors").exists():
+            MODEL_PATH = discovered
+            print(f"[startup] Path set from search: {MODEL_PATH}")
+
+# 2. Fallback recursive search if still not found
+if not (MODEL_PATH / "model.safetensors").exists():
+    print("[startup] Model not in default path, searching common root /runpod-volume...")
+    for path in Path("/runpod-volume").rglob("model.safetensors"):
+        if "speech_tokenizer" not in str(path):
+            MODEL_PATH = path.parent
+            print(f"[startup] Found model at fallback: {MODEL_PATH}")
+            break
 
 # Global model variable
 model = None
