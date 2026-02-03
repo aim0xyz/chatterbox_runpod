@@ -66,7 +66,7 @@ def init_model():
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_PATH),
             dtype=torch.bfloat16,
-            device_map="auto",
+            device_map={"": 0},
             trust_remote_code=True
         )
         
@@ -180,13 +180,11 @@ def generate_tts_handler(job):
         return {"error": "No text provided"}
 
     # --- STORYTELLER VIBE: Natural Pause Injection ---
-    # To prevent 'rushing' between sentences, we add breathing room.
-    # We replace standard punctuation with versions that trigger natural pauses.
+    # We use punctuation that triggers silence WITHOUT being read aloud.
     print(f"[storyteller] Enhancing text for better rhythm and pauses...")
+    # Using '... ' is safer than '[pause]' which the model was reading aloud.
     enhanced_text = text.replace(". ", "... ") \
-                       .replace("! ", "!!! ") \
-                       .replace("? ", "?? ") \
-                       .replace("\n\n", ".\n\n[pause]\n\n") \
+                       .replace("\n\n", "...\n\n\n") \
                        .strip()
     
     # Use the enhanced text for generation
