@@ -181,7 +181,12 @@ def generate_tts_handler(job):
         b64_audio = base64.b64encode(buffer.read()).decode('utf-8')
         print(f"[TTS] Encoded audio size: {len(b64_audio)} bytes")
         
-        return {"audio": b64_audio}
+        return {
+            "status": "success",
+            "audio": b64_audio,
+            "sample_rate": sample_rate,
+            "format": "wav"
+        }
         
     except Exception as e:
         print(f"Generation error: {e}")

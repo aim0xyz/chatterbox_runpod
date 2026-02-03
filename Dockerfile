@@ -33,8 +33,13 @@ RUN pip install --no-cache-dir \
 # Copy the requirements file into the container
 COPY requirements.txt .
 
-# Install Python dependencies from requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies from requirements.txt (excluding flash-attn first)
+RUN grep -v "flash-attn" requirements.txt > /tmp/requirements_base.txt && \
+    pip install --no-cache-dir -r /tmp/requirements_base.txt
+
+# Try to install flash-attn from precompiled wheel, skip if it fails
+RUN pip install --no-cache-dir flash-attn --no-build-isolation || \
+    echo "flash-attn installation skipped (no precompiled wheel available)"
 
 # Pre-install the core Qwen-TTS package to save time on setup
 RUN pip install --no-cache-dir qwen-tts
