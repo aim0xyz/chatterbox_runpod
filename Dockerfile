@@ -42,13 +42,16 @@ RUN python3 -m pip install --no-cache-dir \
     torchaudio==2.2.0 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# 2. Flash Attention is OPTIONAL - skipping installation to avoid build timeouts
-# Qwen-TTS automatically uses PyTorch's built-in SDPA (Scaled Dot-Product Attention) as fallback
-# SDPA provides excellent performance without the compilation complexity
+# 2. Flash Attention - Using pre-compiled wheel to avoid 30min build timeout
+# --only-binary :all: ensures that if the wheel is incompatible, it fails instantly 
+# instead of starting a 30-minute compilation.
+RUN python3 -m pip install --no-cache-dir \
+    https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.6/flash_attn-2.5.6+cu121torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl \
+    --only-binary :all: || echo "Flash Attention wheel not compatible, skipping to avoid build timeout."
 
 # 3. Install remaining dependencies from requirements.txt
 COPY requirements.txt .
-RUN python3 -m pip install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --no-cache-dir -r requirements.txt --only-binary flash-attn
 
 # Pre-download the speech tokenizer and common models
 RUN python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='Qwen/Qwen3-TTS-12Hz-1.7B-Base', filename='config.json')" || echo "Pre-download skipped"
