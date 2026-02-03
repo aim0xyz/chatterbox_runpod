@@ -1,5 +1,5 @@
-# Use a stable Debian-based Python image (Bookworm is more stable than Slim for complex builds)
-FROM python:3.10-bookworm
+# Use NVIDIA CUDA devel image to provide nvcc for building flash-attn
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 # Set the working directory in the container
 WORKDIR /app
@@ -7,12 +7,14 @@ WORKDIR /app
 # Prevent interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME="/runpod-volume/.cache/huggingface"
-ENV TRANSFORMERS_CACHE="/runpod-volume/.cache/huggingface/transformers"
 ENV PYTHONPATH="/app"
 
-# Install system dependencies
+# Install Python and system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    python3.10-dev \
     git \
     git-lfs \
     ffmpeg \
@@ -24,6 +26,14 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Set python3.10 as the default python
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
+    update-alternatives --set python3 /usr/bin/python3.10 && \
+    ln -s /usr/bin/python3 /usr/bin/python
+
+# Upgrade pip
+RUN python -m pip install --upgrade pip
+
 # Install PyTorch with CUDA support (Optimized for RunPod GPUs)
 RUN pip install --no-cache-dir \
     torch>=2.2.0 \
@@ -33,19 +43,11 @@ RUN pip install --no-cache-dir \
 # Copy the requirements file into the container
 COPY requirements.txt .
 
-# Install Python dependencies from requirements.txt (excluding flash-attn first)
-RUN grep -v "flash-attn" requirements.txt > /tmp/requirements_base.txt && \
-    pip install --no-cache-dir -r /tmp/requirements_base.txt
-
-# Try to install flash-attn from precompiled wheel, skip if it fails
-RUN pip install --no-cache-dir flash-attn --no-build-isolation || \
-    echo "flash-attn installation skipped (no precompiled wheel available)"
-
-# Pre-install the core Qwen-TTS package to save time on setup
-RUN pip install --no-cache-dir qwen-tts
+# Install dependencies from requirements.txt
+# This will now succeed for flash-attn because nvcc is available
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-download the speech tokenizer and common models to avoid cold starts
-# (Optional but recommended for production)
 RUN python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='Qwen/Qwen3-TTS-12Hz-1.7B-Base', filename='config.json')" || echo "Pre-download skipped"
 
 # Copy the rest of the application code

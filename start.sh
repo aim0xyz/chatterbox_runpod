@@ -7,9 +7,8 @@ echo "[startup] Starting Qwen3-TTS Handler..."
 # Force working directory to /app where the code lives
 cd /app || exit 1
 
-# 1. Ensure dependencies are installed
-# We use /app/requirements.txt specifically
-pip install --no-cache-dir -r /app/requirements.txt
+# 1. Dependencies are now pre-installed in the Docker image for faster cold starts
+# pip install --no-cache-dir -r /app/requirements.txt
 
 # 2. Comprehensive Model Search
 echo "[debug] --- System Path Search ---"
