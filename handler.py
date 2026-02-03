@@ -1,6 +1,7 @@
 import runpod
 import os
 import torch
+import torch._dynamo
 import base64
 import json
 import io
@@ -72,7 +73,6 @@ def init_model():
         
         # Compile model for 15-30% faster inference
         print("[startup] Compiling model with torch.compile()...")
-        import torch._dynamo
         torch._dynamo.config.suppress_errors = True
         model = torch.compile(model, mode="reduce-overhead")
         
