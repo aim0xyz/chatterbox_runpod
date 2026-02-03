@@ -11,10 +11,17 @@ cd /app || exit 1
 # We use /app/requirements.txt specifically
 pip install --no-cache-dir -r /app/requirements.txt
 
-# 2. Check if model exists
+# 2. Check if model exists & Debug Paths
+echo "[debug] Contents of /qwen3_models:"
+ls -F /qwen3_models
+if [ -d "/qwen3_models/qwen3_models" ]; then
+    echo "[debug] Contents of /qwen3_models/qwen3_models:"
+    ls -F /qwen3_models/qwen3_models
+fi
+
 if [ ! -f "/qwen3_models/model.safetensors" ] && [ ! -f "/qwen3_models/qwen3_models/model.safetensors" ]; then
-    echo "[ERROR] Model files (model.safetensors) not found in /qwen3_models or its subfolder!"
-    echo "Please ensure you have uploaded the model files from S3."
+    echo "[ERROR] Model files (model.safetensors) not found!"
+    echo "Please check the [debug] logs above to see where the files went."
 fi
 
 # 3. Start the RunPod handler

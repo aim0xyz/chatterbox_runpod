@@ -13,10 +13,22 @@ from pathlib import Path
 # ==========================================
 # Model and Voice Paths
 MODEL_PATH = Path("/qwen3_models")
-# Check for nested folder (common if synced via S3 with a prefix)
-if not (MODEL_PATH / "model.safetensors").exists() and (MODEL_PATH / "qwen3_models").exists():
-    MODEL_PATH = MODEL_PATH / "qwen3_models"
-    print(f"[startup] Path adjusted: Model found in nested folder {MODEL_PATH}")
+
+# Recursive search for the actual model directory
+def find_model_dir(root_path):
+    # Search for all model.safetensors, but skip the speech_tokenizer one
+    for path in Path(root_path).rglob("model.safetensors"):
+        if "speech_tokenizer" not in str(path):
+            return path.parent
+    # Fallback if only the tokenizer one exists for some reason
+    for path in Path(root_path).rglob("model.safetensors"):
+        return path.parent
+    return Path(root_path)
+
+REAL_MODEL_PATH = find_model_dir(MODEL_PATH)
+if REAL_MODEL_PATH != MODEL_PATH:
+    print(f"[startup] Path adjusted: Model found at {REAL_MODEL_PATH}")
+    MODEL_PATH = REAL_MODEL_PATH
 VOICE_ROOT = Path("/runpod-volume/user_voices")
 PRESET_ROOT = Path("/runpod-volume/preset_voices")
 
