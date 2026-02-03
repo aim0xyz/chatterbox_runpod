@@ -71,12 +71,14 @@ def init_model():
             model.tokenizer.padding_side = 'left'
             model.tokenizer.pad_token = model.tokenizer.eos_token
         
-        # Compile model for 15-30% faster inference
-        print("[startup] Compiling model with torch.compile()...")
-        torch._dynamo.config.suppress_errors = True
-        model = torch.compile(model, mode="reduce-overhead")
+        # NOTE: torch.compile() is disabled because it fails with Qwen3-TTS
+        # and causes SEVERE slowdown (0.56x realtime instead of 12x realtime).
+        # The model works perfectly without compilation.
+        # print("[startup] Compiling model with torch.compile()...")
+        # torch._dynamo.config.suppress_errors = True
+        # model = torch.compile(model, mode="reduce-overhead")
         
-        print("[startup] Model loaded and compiled successfully!")
+        print("[startup] Model loaded successfully!")
     except Exception as e:
         print(f"[startup] Error loading model: {e}")
 
@@ -176,13 +178,25 @@ def generate_tts_handler(job):
     repetition_penalty = float(inp.get("repetition_penalty", 1.0))  # Natural flow, no penalty (was 1.02)
     top_k = int(inp.get("top_k", 60))                  # Maximum voice variation (was 50)
     
-    # Optimized for typical stories (4096 tokens ≈ 5 minutes of audio)
-    # Set higher in request for very long stories
-    max_new_tokens = int(inp.get("max_new_tokens", 4096))
-    
+    # CRITICAL: Calculate max_new_tokens based on actual text length to prevent hallucination
+    # Qwen3-TTS generates ~1.5 tokens per character on average
+    # Add 10% buffer for prosody/pauses, but not too much or it generates garbage noise
     if not text:
         return {"error": "No text provided"}
-        
+    
+    # Smart token calculation: Estimate based on text length
+    estimated_tokens = int(len(text) * 1.5)  # ~1.5 tokens per char
+    buffer_tokens = int(estimated_tokens * 0.1)  # 10% buffer
+    calculated_max_tokens = estimated_tokens + buffer_tokens
+    
+    # Override with manual setting if provided, otherwise use calculated value
+    # Clamp between 512 and 8192 for safety
+    max_new_tokens = int(inp.get("max_new_tokens", calculated_max_tokens))
+    max_new_tokens = max(512, min(max_new_tokens, 8192))
+    
+    print(f"[TTS] Text length: {len(text)} chars")
+    print(f"[TTS] Calculated max_new_tokens: {calculated_max_tokens} (using: {max_new_tokens})")
+    
     # Find prompt audio for zero-shot cloning
     voice_path = find_voice(user_id=user_id, voice_id=voice_id, preset=preset_voice)
     if not voice_path:
