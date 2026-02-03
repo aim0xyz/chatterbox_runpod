@@ -154,9 +154,16 @@ def generate_tts_handler(job):
     preset_voice = inp.get("preset_voice")
     voice_id = inp.get("voice_id") or inp.get("embedding_filename")
     
-    # Generation parameters
-    temperature = float(inp.get("temperature", 0.7))
-    top_p = float(inp.get("top_p", 0.8))
+    # Generation parameters (optimized for voice fidelity + storytelling)
+    # Lower temperature = more consistent voice matching
+    # Higher temperature = more expressive but may drift from original voice
+    temperature = float(inp.get("temperature", 0.65))  # Conservative for voice fidelity
+    top_p = float(inp.get("top_p", 0.8))               # Natural variation
+    repetition_penalty = float(inp.get("repetition_penalty", 1.05))  # Prevents monotony
+    top_k = int(inp.get("top_k", 35))                  # Balanced token selection
+    
+    # High default for long stories (8192 tokens ≈ 10 minutes of reading)
+    max_new_tokens = int(inp.get("max_new_tokens", 8192))
     
     if not text:
         return {"error": "No text provided"}
@@ -166,7 +173,8 @@ def generate_tts_handler(job):
     if not voice_path:
         return {"error": f"Voice not found: {preset_voice or voice_id}"}
         
-    print(f"[TTS] Generating for user={user_id}, lang={language} (from {lang_code}), voice={voice_path} (temp={temperature}, top_p={top_p})")
+    print(f"[TTS] Generating for user={user_id}, lang={language} (from {lang_code}), voice={voice_path}")
+    print(f"[TTS] Parameters: temp={temperature}, top_p={top_p}, rep_penalty={repetition_penalty}, top_k={top_k}")
     
     try:
         if not model:
@@ -175,13 +183,22 @@ def generate_tts_handler(job):
         # CALL QWEN3-TTS
         # Official signature: model.generate_voice_clone(text, language, ref_audio, ...)
         # We use x_vector_only_mode=True as we don't always have the reference text for prompts
+        
+        # Build generation kwargs
+        gen_kwargs = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "repetition_penalty": repetition_penalty,
+            "top_k": top_k,
+            "max_new_tokens": max_new_tokens,  # Always set for long stories
+        }
+        
         wavs, sample_rate = model.generate_voice_clone(
             text=text,
             language=language,
             ref_audio=str(voice_path),
             x_vector_only_mode=True,
-            temperature=temperature,
-            top_p=top_p
+            **gen_kwargs  # Pass all generation parameters
         )
         
         # Qwen3 returns a list of numpy arrays, pick the first one
