@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # --- FLASH ATTENTION SIDE-LOAD ---
-# If you upload the .whl to your volume, we install it here instantly.
-# RECOMMENDATION: Rename your uploaded file to 'flash_attn.whl' for this to work!
-WHL_PATH="/runpod-volume/qwen3_models/flash_attn.whl"
-if [ -f "$WHL_PATH" ]; then
-    echo "[startup] Found Flash Attention wheel (flash_attn.whl) in volume. Installing..."
-    python3 -m pip install "$WHL_PATH" --no-deps
+# Detect any Flash Attention wheel in the volume and install it.
+# This bypasses pip's 'wrong number of parts' error by using a wildcard.
+WHL_FILE=$(ls /runpod-volume/qwen3_models/flash_attn*.whl 2>/dev/null | head -n 1)
+if [ -n "$WHL_FILE" ]; then
+    echo "[startup] Found Flash Attention wheel: $WHL_FILE. Installing..."
+    python3 -m pip install "$WHL_FILE" --no-deps
 else
-    echo "[startup] No 'flash_attn.whl' found in volume, skipping side-load."
+    echo "[startup] No Flash Attention wheel found in /runpod-volume/qwen3_models/, skipping side-load."
 fi
 
 # Start the handler
