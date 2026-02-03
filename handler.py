@@ -168,37 +168,32 @@ def generate_tts_handler(job):
     preset_voice = inp.get("preset_voice")
     voice_id = inp.get("voice_id") or inp.get("embedding_filename")
     
-    # Generation parameters (balanced for stability and expression)
-    # 0.85 temperature is the 'sweet spot' for stability without rushing
-    # 1.05 repetition penalty prevents the model from speeding up or looping
-    temperature = float(inp.get("temperature", 0.85))  # Balanced (was 0.95)
-    top_p = float(inp.get("top_p", 0.92))              # Keep high for prosody variation
-    repetition_penalty = float(inp.get("repetition_penalty", 1.05))  # Stabilizer (was 1.0)
-    top_k = int(inp.get("top_k", 60))                  # Maximum voice variation (was 50)
+    # --- HIFI VOICE CLONING & STABILITY ---
+    # To sound 'exactly like the sample', we reset repetition_penalty to 1.0. 
+    # To fix rushing, we lower temperature slightly more.
+    temperature = float(inp.get("temperature", 0.8))  # Cooler = more stable, less rushing
+    top_p = float(inp.get("top_p", 0.95))              # Higher = more of the sample's character
+    repetition_penalty = float(inp.get("repetition_penalty", 1.0)) # 1.0 = Purest clone (no distortion)
+    top_k = int(inp.get("top_k", 70))                  # More variation for natural feel
     
     if not text:
         return {"error": "No text provided"}
 
-    # --- STORYTELLER VIBE: Natural Pause Injection ---
-    # We use punctuation that triggers silence WITHOUT being read aloud.
-    print(f"[storyteller] Enhancing text for better rhythm and pauses...")
-    # Using '... ' is safer than '[pause]' which the model was reading aloud.
-    enhanced_text = text.replace(". ", "... ") \
-                       .replace("\n\n", "...\n\n\n") \
-                       .strip()
+    # --- STORYTELLER RHYTHM: Forced Newline Pauses ---
+    # Dots can be ignored, but consecutive newlines force the model to 'breathe'.
+    print(f"[storyteller] Adding structural pauses for rhythm...")
+    # Add a mandatory newline after every sentence to force a pause
+    enhanced_text = text.replace(". ", ".\n\n") \
+                       .replace("! ", "!\n\n") \
+                       .replace("? ", "?\n\n")
     
-    # Use the enhanced text for generation
+    # --- CONCLUDING INTONATION ---
+    # Add a final 'End of Story' breathe
+    enhanced_text = enhanced_text.strip() + "\n\n\n.  "
+    
+    # Use the enhanced text
     original_text = text
     text = enhanced_text
-    
-    # --- CONCLUDING INTONATION FIX ---
-    # Add extra punctuation at the very end to signal a definitive wrap-up.
-    # This forces the pitch to drop and adds a natural final silence.
-    print(f"[storyteller] Adding concluding intonation...")
-    if text.endswith(".") or text.endswith("!") or text.endswith("?"):
-        text = text + "....  "
-    else:
-        text = text + "....  "
 
     
     # Smart token calculation (use original length for base, enhanced for limit)
