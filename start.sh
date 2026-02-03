@@ -12,10 +12,9 @@ cd /app || exit 1
 pip install --no-cache-dir -r /app/requirements.txt
 
 # 2. Check if model exists
-if [ ! -f "/qwen3_models/model.safetensors" ]; then
-    echo "[ERROR] Model files (specifically model.safetensors) not found in /qwen3_models!"
-    echo "Please ensure you have uploaded the model files from S3 to that directory."
-    # We don't exit here, in case they are using a different filename, but handler.py will likely fail later.
+if [ ! -f "/qwen3_models/model.safetensors" ] && [ ! -f "/qwen3_models/qwen3_models/model.safetensors" ]; then
+    echo "[ERROR] Model files (model.safetensors) not found in /qwen3_models or its subfolder!"
+    echo "Please ensure you have uploaded the model files from S3."
 fi
 
 # 3. Start the RunPod handler

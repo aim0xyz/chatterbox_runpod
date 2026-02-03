@@ -11,7 +11,12 @@ from pathlib import Path
 # ==========================================
 # CONFIGURATION
 # ==========================================
+# Model and Voice Paths
 MODEL_PATH = Path("/qwen3_models")
+# Check for nested folder (common if synced via S3 with a prefix)
+if not (MODEL_PATH / "model.safetensors").exists() and (MODEL_PATH / "qwen3_models").exists():
+    MODEL_PATH = MODEL_PATH / "qwen3_models"
+    print(f"[startup] Path adjusted: Model found in nested folder {MODEL_PATH}")
 VOICE_ROOT = Path("/runpod-volume/user_voices")
 PRESET_ROOT = Path("/runpod-volume/preset_voices")
 
