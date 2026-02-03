@@ -173,11 +173,13 @@ def generate_tts_handler(job):
         
         # Qwen3 returns a list of numpy arrays, pick the first one
         audio_array = wavs[0]
+        print(f"[TTS] Generated audio shape: {audio_array.shape}, sample_rate: {sample_rate}")
         
         buffer = io.BytesIO()
         sf.write(buffer, audio_array, sample_rate, format='WAV')
         buffer.seek(0)
         b64_audio = base64.b64encode(buffer.read()).decode('utf-8')
+        print(f"[TTS] Encoded audio size: {len(b64_audio)} bytes")
         
         return {"audio": b64_audio}
         

@@ -8,4 +8,5 @@ accelerate
 huggingface_hub
 soundfile
 pydub
+flash-attn>=2.0.0
 qwen-tts
