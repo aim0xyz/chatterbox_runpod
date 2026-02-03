@@ -42,15 +42,13 @@ RUN python3 -m pip install --no-cache-dir \
     torchaudio==2.2.0 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# 2. Install Flash Attention (Try pre-compiled wheels first, build from source if needed)
-# Try multiple wheel versions and as last resort build from source
+# 2. Install Flash Attention using verified pre-compiled wheel
+# Using v2.5.3 with CUDA 12.2 (backward compatible with CUDA 12.1)
+# This wheel is confirmed to exist and install successfully
 RUN python3 -m pip install --no-cache-dir --no-build-isolation \
-    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu121torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" || \
-    python3 -m pip install --no-cache-dir --no-build-isolation \
-    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.0.post2/flash_attn-2.7.0.post2+cu12torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" || \
-    MAX_JOBS=2 python3 -m pip install --no-cache-dir flash-attn --no-build-isolation
+    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.3/flash_attn-2.5.3+cu122torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 
-# 3. Copy and install the rest of requirements
+# 3. Install remaining dependencies from requirements.txt
 COPY requirements.txt .
 RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
