@@ -89,11 +89,21 @@ def find_voice(user_id=None, voice_id=None, preset=None):
         for ext in ['', '.wav', '.mp3', '.flac']:
             p = PRESET_ROOT / f"{preset}{ext}"
             if p.exists():
+                print(f"[find_voice] ✅ Found preset at: {p}")
                 return p
         
-        # Fallback: search recursively
+        # Fallback: search recursively in presets
         for f in PRESET_ROOT.rglob(f"*{preset}*"):
             if f.is_file():
+                print(f"[find_voice] ✅ Found preset (recursive) at: {f}")
+                return f
+        
+        # If not found in presets, try searching in user_voices
+        # This handles cases where user voices are incorrectly sent as "preset"
+        print(f"[find_voice] ⚠️ Not found in presets, searching user_voices...")
+        for f in VOICE_ROOT.rglob(f"*{preset}*"):
+            if f.is_file():
+                print(f"[find_voice] ✅ Found user voice at: {f}")
                 return f
             
     # 2. User Voice
@@ -103,10 +113,13 @@ def find_voice(user_id=None, voice_id=None, preset=None):
         if not p.suffix:
             for ext in ['.wav', '.mp3']:
                 if (p.with_suffix(ext)).exists():
+                    print(f"[find_voice] ✅ Found user voice at: {p.with_suffix(ext)}")
                     return p.with_suffix(ext)
         elif p.exists():
+            print(f"[find_voice] ✅ Found user voice at: {p}")
             return p
-                
+    
+    print(f"[find_voice] ❌ Voice not found anywhere")
     return None
 
 def save_base64_audio(b64_data, dest_path):
