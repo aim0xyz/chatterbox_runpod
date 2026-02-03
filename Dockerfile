@@ -51,8 +51,8 @@ COPY requirements.txt .
 # We use --only-binary here to prevent qwen-tts from trying to compile flash-attn if the wheel failed
 RUN python3 -m pip install --no-cache-dir -r requirements.txt --only-binary flash-attn
 
-# Pre-download the speech tokenizer and common models
-RUN python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='Qwen/Qwen3-TTS-12Hz-1.7B-Base', filename='config.json')" || echo "Pre-download skipped"
+# Pre-download the speech tokenizer and common models (0.6B version for speed)
+RUN python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='Qwen/Qwen3-TTS-12Hz-0.6B-Base', filename='config.json')" || echo "Pre-download skipped"
 
 # Copy the rest of the application code
 COPY handler.py .
