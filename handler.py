@@ -59,9 +59,9 @@ def init_model():
         from qwen_tts import Qwen3TTSModel
         print(f"[startup] Loading Qwen3-TTS model from {MODEL_PATH}...")
         model = Qwen3TTSModel.from_pretrained(
-            MODEL_PATH,
+            str(MODEL_PATH),
             dtype=torch.bfloat16,
-            device="cuda"
+            device_map="auto"
         )
         print("[startup] Model loaded successfully!")
     except Exception as e:
