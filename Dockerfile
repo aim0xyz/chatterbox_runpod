@@ -42,10 +42,9 @@ RUN python3 -m pip install --no-cache-dir \
     torchaudio==2.2.0 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# 2. Install Flash Attention using official method from PyPI
-# This will automatically select the correct pre-built wheel for our environment
-# or compile from source if no wheel is available (limited to MAX_JOBS=4 to prevent timeout)
-RUN MAX_JOBS=4 python3 -m pip install --no-cache-dir flash-attn --no-build-isolation
+# 2. Flash Attention is OPTIONAL - skipping installation to avoid build timeouts
+# Qwen-TTS automatically uses PyTorch's built-in SDPA (Scaled Dot-Product Attention) as fallback
+# SDPA provides excellent performance without the compilation complexity
 
 # 3. Install remaining dependencies from requirements.txt
 COPY requirements.txt .
