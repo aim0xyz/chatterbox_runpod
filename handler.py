@@ -54,8 +54,12 @@ LANG_MAP = {
 }
 
 def init_model():
-    """Load the Qwen3-TTS model."""
+    """Load the Qwen3-TTS model with singleton check."""
     global model
+    if model is not None:
+        print("[startup] Model already loaded, skipping...")
+        return
+        
     try:
         from qwen_tts import Qwen3TTSModel
         print(f"[startup] Loading Qwen3-TTS model from {MODEL_PATH}...")
@@ -66,24 +70,19 @@ def init_model():
             trust_remote_code=True
         )
         
-        # Configure tokenizer padding to avoid tensor creation errors
+        # Configure tokenizer padding
         if hasattr(model, 'tokenizer') and model.tokenizer is not None:
             model.tokenizer.padding_side = 'left'
             model.tokenizer.pad_token = model.tokenizer.eos_token
         
-        # NOTE: torch.compile() is disabled because it fails with Qwen3-TTS
-        # and causes SEVERE slowdown (0.56x realtime instead of 12x realtime).
-        # The model works perfectly without compilation.
-        # print("[startup] Compiling model with torch.compile()...")
-        # torch._dynamo.config.suppress_errors = True
-        # model = torch.compile(model, mode="reduce-overhead")
-        
-        print("[startup] Model loaded successfully!")
+        # NOTE: torch.compile() is disabled to prevent graph breaks
+        print("[startup] Model loaded successfully into GPU!")
     except Exception as e:
         print(f"[startup] Error loading model: {e}")
 
-# Call init
-init_model()
+# Call init once at startup
+if __name__ == "__main__" or os.environ.get("RUNPOD_AGENT_ID"):
+    init_model()
 
 # ==========================================
 # HELPERS
@@ -169,23 +168,43 @@ def generate_tts_handler(job):
     preset_voice = inp.get("preset_voice")
     voice_id = inp.get("voice_id") or inp.get("embedding_filename")
     
-    # Generation parameters (optimized for dynamic, expressive storytelling)
-    # Higher temperature = more dramatic and exaggerated delivery
-    # Higher top_p = more diversity in prosody and intonation
-    # Lower repetition_penalty = more natural flow, prevents monotone sentence endings
-    temperature = float(inp.get("temperature", 0.95))  # Very expressive and dynamic (was 0.85)
-    top_p = float(inp.get("top_p", 0.92))              # High variation in prosody (was 0.9)
-    repetition_penalty = float(inp.get("repetition_penalty", 1.0))  # Natural flow, no penalty (was 1.02)
+    # Generation parameters (balanced for stability and expression)
+    # 0.85 temperature is the 'sweet spot' for stability without rushing
+    # 1.05 repetition penalty prevents the model from speeding up or looping
+    temperature = float(inp.get("temperature", 0.85))  # Balanced (was 0.95)
+    top_p = float(inp.get("top_p", 0.92))              # Keep high for prosody variation
+    repetition_penalty = float(inp.get("repetition_penalty", 1.05))  # Stabilizer (was 1.0)
     top_k = int(inp.get("top_k", 60))                  # Maximum voice variation (was 50)
     
-    # CRITICAL: Calculate max_new_tokens based on actual text length to prevent hallucination
-    # Qwen3-TTS generates ~1.5 tokens per character on average
-    # Add 10% buffer for prosody/pauses, but not too much or it generates garbage noise
     if not text:
         return {"error": "No text provided"}
+
+    # --- STORYTELLER VIBE: Natural Pause Injection ---
+    # To prevent 'rushing' between sentences, we add breathing room.
+    # We replace standard punctuation with versions that trigger natural pauses.
+    print(f"[storyteller] Enhancing text for better rhythm and pauses...")
+    enhanced_text = text.replace(". ", "... ") \
+                       .replace("! ", "!!! ") \
+                       .replace("? ", "?? ") \
+                       .replace("\n\n", ".\n\n[pause]\n\n") \
+                       .strip()
     
-    # Smart token calculation: Estimate based on text length
-    estimated_tokens = int(len(text) * 1.5)  # ~1.5 tokens per char
+    # Use the enhanced text for generation
+    original_text = text
+    text = enhanced_text
+    
+    # --- CONCLUDING INTONATION FIX ---
+    # Add extra punctuation at the very end to signal a definitive wrap-up.
+    # This forces the pitch to drop and adds a natural final silence.
+    print(f"[storyteller] Adding concluding intonation...")
+    if text.endswith(".") or text.endswith("!") or text.endswith("?"):
+        text = text + "....  "
+    else:
+        text = text + "....  "
+
+    
+    # Smart token calculation (use original length for base, enhanced for limit)
+    estimated_tokens = int(len(original_text) * 1.5)  # ~1.5 tokens per char
     buffer_tokens = int(estimated_tokens * 0.1)  # 10% buffer
     calculated_max_tokens = estimated_tokens + buffer_tokens
     
