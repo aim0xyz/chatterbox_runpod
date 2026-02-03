@@ -37,13 +37,16 @@ RUN python3 -m pip install --upgrade pip setuptools wheel packaging ninja
 
 # 1. Install PyTorch with CUDA support (MUST BE FINISHED BEFORE FLASH ATTN)
 RUN python3 -m pip install --no-cache-dir \
-    torch>=2.2.0 \
-    torchaudio>=2.2.0 \
+    torch==2.2.0 \
+    torchaudio==2.2.0 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
 # 2. Install Flash Attention (Using pre-compiled binaries to avoid 30-min timeout)
-# We point to the official CUDA 12.1 wheels
-RUN python3 -m pip install flash-attn --no-cache-dir --no-build-isolation --find-links https://github.com/Dao-AILab/flash-attention/releases/latest
+# We use direct URLs to the wheels because GitHub releases are not a PEP 503 index
+RUN python3 -m pip install --no-cache-dir --no-build-isolation \
+    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu121torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" || \
+    python3 -m pip install --no-cache-dir --no-build-isolation \
+    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.0.post2/flash_attn-2.7.0.post2+cu12torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 
 # 3. Copy and install the rest of requirements
 COPY requirements.txt .
