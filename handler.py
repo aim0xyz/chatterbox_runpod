@@ -183,33 +183,8 @@ def generate_tts_handler(job):
     if not voice_path:
         return {"error": f"Voice not found: {preset_voice or voice_id}"}
 
-    # --- CUDA OPTIMIZATIONS ---
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.deterministic = False
-        print("[startup] CUDA optimizations (benchmark=True) enabled")
-
-    # --- STORYTELLER VIBE: Natural Pause Injection ---
-    # To prevent 'rushing' between sentences, we add breathing room.
-    # We replace standard punctuation with versions that the model interprets as pauses.
-    print(f"[storyteller] Enhancing text for better rhythm and pauses...")
-    text = text.replace(". ", "... ") \
-               .replace("! ", "!!! ") \
-               .replace("? ", "?? ") \
-               .replace("\n\n", ".\n\n[pause]\n\n") \
-               .strip()
-    
-    # --- CONCLUDING INTONATION FIX ---
-    # Add extra punctuation at the very end to signal a definitive wrap-up.
-    # This forces the pitch to drop and adds a natural final silence.
-    print(f"[storyteller] Adding concluding intonation...")
-    if text.endswith(".") or text.endswith("!") or text.endswith("?"):
-        text = text + "....  "
-    else:
-        text = text + "....  "
-
     # --- THE STITCHER: SMART CHUNKING ---
-    def split_into_chunks(t, max_chars=250): # Reduced from 400 for 8s target
+    def split_into_chunks(t, max_chars=300):
         # Split by sentence markers but keep punctuation
         sentences = re.split('(?<=[.!?]) +', t)
         chunks = []
@@ -246,39 +221,29 @@ def generate_tts_handler(job):
         if model is None:
              return {"error": "Model not loaded"}
 
-        model.eval()
-        with torch.inference_mode():
-            for i, chunk in enumerate(text_chunks):
-                # Log progress for UI
-                progress_pct = int((i / len(text_chunks)) * 90)
-                log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
-                
-                chunk_start = time.time()
-                # LIMIT tokens based on text length to prevent slow hallucinations
-                limit = int(len(chunk) * 2.1) + 60
-                
-                # Generate this specific chunk
-                wavs, sample_rate = model.generate_voice_clone(
-                    text=chunk,
-                    language=language,
-                    ref_audio=str(voice_path),
-                    temperature=temperature,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                    top_k=top_k,
-                    x_vector_only_mode=True,
-                    max_new_tokens=limit
-                )
-                
-                dt = time.time() - chunk_start
-                print(f"[TTS] Chunk {i+1} done in {dt:.2f}s | Limit: {limit}")
-                
-                sr = sample_rate
-                all_audio.append(wavs[0])
-                
-                # Add 400ms silence for natural rhythm
-                silence = np.zeros(int(0.4 * sr))
-                all_audio.append(silence)
+        for i, chunk in enumerate(text_chunks):
+            # Log progress for UI
+            progress_pct = int((i / len(text_chunks)) * 90)
+            log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
+            
+            # Generate this specific chunk
+            # Parameters optimized for high-quality cloning
+            wavs, sample_rate = model.generate_voice_clone(
+                text=chunk,
+                language=language,
+                ref_audio=str(voice_path),
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                top_k=top_k,
+                x_vector_only_mode=True
+            )
+            sr = sample_rate
+            all_audio.append(wavs[0])
+            
+            # Add 400ms silence between sentences for natural storyteller rhythm
+            silence = np.zeros(int(0.4 * sr))
+            all_audio.append(silence)
             
         # Combine pieces
         final_audio = np.concatenate(all_audio)
