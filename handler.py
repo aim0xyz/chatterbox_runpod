@@ -61,8 +61,15 @@ def init_model():
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_PATH),
             dtype=torch.bfloat16,
-            device_map="auto"
+            device_map="auto",
+            trust_remote_code=True
         )
+        
+        # Configure tokenizer padding to avoid tensor creation errors
+        if hasattr(model, 'tokenizer') and model.tokenizer is not None:
+            model.tokenizer.padding_side = 'left'
+            model.tokenizer.pad_token = model.tokenizer.eos_token
+            
         print("[startup] Model loaded successfully!")
     except Exception as e:
         print(f"[startup] Error loading model: {e}")
