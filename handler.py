@@ -4,6 +4,7 @@ import torch
 import base64
 import json
 import io
+import time
 import soundfile as sf
 import numpy as np
 from pathlib import Path
@@ -37,9 +38,20 @@ if not (MODEL_PATH / "model.safetensors").exists():
 # Global model variable
 model = None
 
-# ==========================================
-# SETUP & LOADING
-# ==========================================
+# Language mapping (Qwen3 wants full names, not ISO codes)
+LANG_MAP = {
+    "zh": "chinese",
+    "en": "english",
+    "fr": "french",
+    "de": "german",
+    "it": "italian",
+    "ja": "japanese",
+    "ko": "korean",
+    "pt": "portuguese",
+    "ru": "russian",
+    "es": "spanish"
+}
+
 def init_model():
     """Load the Qwen3-TTS model."""
     global model
@@ -120,7 +132,11 @@ def generate_tts_handler(job):
     """Handle text-to-speech request."""
     inp = job["input"]
     text = inp.get("text")
-    language = inp.get("language", "en") # 'en', 'de', etc.
+    lang_code = inp.get("language", "en") # 'en', 'de', etc.
+    
+    # Translate language code to full name (e.g. 'de' -> 'german')
+    language = LANG_MAP.get(lang_code.lower(), "auto")
+    
     user_id = inp.get("user_id")
     preset_voice = inp.get("preset_voice")
     voice_id = inp.get("voice_id") or inp.get("embedding_filename")
@@ -137,7 +153,7 @@ def generate_tts_handler(job):
     if not voice_path:
         return {"error": f"Voice not found: {preset_voice or voice_id}"}
         
-    print(f"[TTS] Generating for user={user_id}, lang={language}, voice={voice_path} (temp={temperature}, top_p={top_p})")
+    print(f"[TTS] Generating for user={user_id}, lang={language} (from {lang_code}), voice={voice_path} (temp={temperature}, top_p={top_p})")
     
     try:
         if not model:
@@ -179,23 +195,23 @@ def clone_voice_handler(job):
     voice_name = inp.get("voice_name")
     audio_data = inp.get("audio_data") # Base64
     
-    if not user_id or not voice_name or not audio_data:
-        return {"error": "Missing user_id, voice_name, or audio_data"}
-        
-    # Destination: /runpod-volume/user_voices/{user_id}/{voice_name}.wav
-    # Clean filename
+    # Create a unique filename with timestamp to avoid collisions
+    # Format: {safe_name}_{timestamp}.wav
+    # This matches the parsing logic in UserVoice.fromJson in the Flutter app
+    timestamp = int(time.time())
     safe_name = "".join(x for x in voice_name if x.isalnum() or x in "-_")
-    dest_path = get_user_dir(user_id) / f"{safe_name}.wav"
+    filename = f"{safe_name}_{timestamp}.wav"
+    dest_path = get_user_dir(user_id) / filename
     
     print(f"[Clone] Saving voice '{voice_name}' for user {user_id} (path: {dest_path})")
     
     if save_base64_audio(audio_data, dest_path):
         return {
             "status": "success", 
-            "voice_id": safe_name,
+            "voice_id": filename, # Return the full filename as the ID
             "voice_name": voice_name,
             "user_id": user_id,
-            "embedding_filename": f"{safe_name}.wav",
+            "embedding_filename": filename,
             "message": "Voice saved successfully for zero-shot inference"
         }
     else:
