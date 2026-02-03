@@ -42,12 +42,9 @@ RUN python3 -m pip install --no-cache-dir \
     torchaudio==2.2.0 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# 2. Flash Attention - Using pre-compiled wheel (abiTRUE version)
-# --only-binary :all: ensures that if the wheel is incompatible, it fails instantly 
-# instead of starting a 30-minute compilation.
-RUN python3 -m pip install --no-cache-dir \
-    https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.6/flash_attn-2.5.6+cu121torch2.2cxx11abiTRUE-cp310-cp310-linux_x86_64.whl \
-    --only-binary :all: || echo "Flash Attention wheel not compatible, skipping to avoid build timeout."
+# 2. INSTALL FLASH ATTENTION (SIDE-LOADED)
+# We now install this via start.sh from the persistent volume for maximum speed.
+# RUN pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.2cxx11abiFALSE-cp310-cp310-linux_x86_64.whl --no-build-isolation
 
 # 3. Install remaining dependencies from requirements.txt
 COPY requirements.txt .

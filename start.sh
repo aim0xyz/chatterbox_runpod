@@ -1,7 +1,17 @@
 #!/bin/bash
 
-# Qwen3-TTS Startup Script for RunPod
+# --- FLASH ATTENTION SIDE-LOAD ---
+# If you upload the .whl to your volume, we install it here instantly.
+# RECOMMENDATION: Rename your uploaded file to 'flash_attn.whl' for this to work!
+WHL_PATH="/runpod-volume/qwen3_models/flash_attn.whl"
+if [ -f "$WHL_PATH" ]; then
+    echo "[startup] Found Flash Attention wheel (flash_attn.whl) in volume. Installing..."
+    python3 -m pip install "$WHL_PATH" --no-deps
+else
+    echo "[startup] No 'flash_attn.whl' found in volume, skipping side-load."
+fi
 
+# Start the handler
 echo "[startup] Starting Qwen3-TTS Handler..."
 
 # Force working directory to /app where the code lives
