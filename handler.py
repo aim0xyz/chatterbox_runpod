@@ -43,25 +43,19 @@ model = None
 def init_model():
     """Load the Qwen3-TTS model."""
     global model
-    print("[startup] Loading Qwen3-TTS model from local directory...")
-    
     try:
         from qwen_tts import Qwen3TTSModel
-        
-        # Load model using the official Qwen3TTSModel wrapper
-        # We pass dtype=torch.bfloat16 for efficiency on modern GPUs
+        print(f"[startup] Loading Qwen3-TTS model from {MODEL_PATH}...")
         model = Qwen3TTSModel.from_pretrained(
-            str(MODEL_PATH),
+            MODEL_PATH,
             dtype=torch.bfloat16,
-            device_map="auto"
+            device="cuda"
         )
         print("[startup] Model loaded successfully!")
-        
     except Exception as e:
         print(f"[startup] Error loading model: {e}")
-        model = None
 
-# Initialize on start
+# Call init
 init_model()
 
 # ==========================================
