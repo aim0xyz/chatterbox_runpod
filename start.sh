@@ -1,21 +1,15 @@
 #!/bin/bash
 
-# --- FLASH ATTENTION SIDE-LOAD ---
-# Try v2.8.3 first (latest), fallback to v2.7.4
-WHL_FILE="/runpod-volume/qwen3_models/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl"
-if [ ! -f "$WHL_FILE" ]; then
-    WHL_FILE="/runpod-volume/qwen3_models/flash_attn-2.7.4-cp310-cp310-linux_x86_64.whl"
-fi
+# --- FLASH ATTENTION INSTALLATION FROM VOLUME ---
+# Install the Python 3.12 compatible wheel from volume
+FLASH_ATTN_WHEEL="/runpod-volume/qwen3_models/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 
-if [ -f "$WHL_FILE" ]; then
-    echo "[startup] Found Flash Attention wheel: $WHL_FILE"
-    # Create temp valid name and install
-    TEMP_WHL="/tmp/$(basename $WHL_FILE)"
-    cp "$WHL_FILE" "$TEMP_WHL"
-    echo "[startup] Installing via temporary valid name: $TEMP_WHL"
-    python3 -m pip install "$TEMP_WHL" --no-deps
+if [ -f "$FLASH_ATTN_WHEEL" ]; then
+    echo "[startup] Installing Flash Attention from volume: $FLASH_ATTN_WHEEL"
+    python3 -m pip install "$FLASH_ATTN_WHEEL" --no-deps
 else
-    echo "[startup] No Flash Attention wheel found, will try to install from PyPI"
+    echo "[startup] ⚠️  Flash Attention wheel not found at: $FLASH_ATTN_WHEEL"
+    echo "[startup] ⚠️  Model will run without Flash Attention (slower)"
 fi
 
 # Start the handler
@@ -24,8 +18,7 @@ echo "[startup] Starting Qwen3-TTS Handler..."
 # Force working directory to /app where the code lives
 cd /app || exit 1
 
-# Dependencies are now pre-installed in the Docker image for faster cold starts
-# pip install --no-cache-dir -r /app/requirements.txt
+# Dependencies are pre-installed in the Docker image (including flash-attn built from source)
 
 # Start the RunPod handler
 echo "[startup] Launching handler.py..."

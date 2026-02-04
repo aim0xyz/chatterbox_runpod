@@ -1,6 +1,6 @@
 runpod==1.6.0
-torch>=2.5.0
-torchaudio>=2.5.0
+# Note: torch and torchaudio are installed in Dockerfile with CUDA 12.4 support
+# Note: flash-attn 2.8.3 is installed in Dockerfile via official wheel (Python 3.12 + PyTorch 2.9 + CUDA 12)
 numpy<2.0.0
 scipy
 transformers>=4.40.0,<5.0.0
@@ -8,6 +8,4 @@ accelerate
 huggingface_hub
 soundfile
 pydub
-# Latest qwen-tts from PyPI (may or may not have FA3 support)
 qwen-tts
-# Note: flash-attn 2.8.3 is installed via wheel in start.sh (requires torch 2.5+)
