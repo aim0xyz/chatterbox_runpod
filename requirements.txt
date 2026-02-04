@@ -8,4 +8,4 @@ accelerate
 huggingface_hub
 soundfile
 pydub
-qwen-tts>=0.1.5
+qwen-tts>=0.0.5
