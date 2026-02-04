@@ -78,7 +78,7 @@ def init_model():
             dtype=torch.bfloat16,
             device_map={"": 0},
             trust_remote_code=True,
-            attn_implementation="flash_attention_2"
+            attn_implementation="auto"
         )
 
         # Reduce VRAM pressure for serverless concurrency
