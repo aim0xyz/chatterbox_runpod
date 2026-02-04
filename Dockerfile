@@ -59,10 +59,13 @@ RUN python3 -m pip install --no-cache-dir \
 # 2. Flash Attention will be installed from volume in start.sh
 
 # Clone and install qwen-tts from source (latest FA2 support)
-RUN git clone https://github.com/QwenLM/Qwen3-TTS.git /tmp/qwen-tts && \
-    cd /tmp/qwen-tts && \
-    python3 -m pip install --no-cache-dir -e . && \
-    cd / && rm -rf /tmp/qwen-tts
+# RUN git clone https://github.com/QwenLM/Qwen3-TTS.git /tmp/qwen-tts && \
+#     cd /tmp/qwen-tts && \
+#     python3 -m pip install --no-cache-dir -e . && \
+#     cd / && rm -rf /tmp/qwen-tts
+
+# Install qwen-tts directly from GitHub via pip (Alternative approach)
+RUN python3 -m pip install --no-cache-dir git+https://github.com/QwenLM/Qwen3-TTS.git
 
 # 3. Install remaining dependencies from requirements.txt
 COPY requirements.txt .
