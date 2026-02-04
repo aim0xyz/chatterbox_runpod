@@ -64,8 +64,8 @@ RUN python3 -m pip install --no-cache-dir \
 #     python3 -m pip install --no-cache-dir -e . && \
 #     cd / && rm -rf /tmp/qwen-tts
 
-# Install qwen-tts directly from GitHub via pip (Alternative approach)
-RUN python3 -m pip install --no-cache-dir git+https://github.com/QwenLM/Qwen3-TTS.git
+# NEW LINE: Install from the "dev" branch which contains FA2 fixes
+RUN python3 -m pip install --no-cache-dir git+https://github.com/QwenLM/Qwen3-TTS.git@dev
 
 # 3. Install remaining dependencies from requirements.txt
 COPY requirements.txt .
