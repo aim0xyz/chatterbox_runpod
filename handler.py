@@ -252,20 +252,18 @@ def generate_tts_handler(job):
              return {"error": "Model not loaded"}
 
         # --- SPEED INJECTOR 1: Voice DNA Caching ---
-        # We process the voice ONCE here so it's ready for all chunks.
-        # This prevents the AI from 're-learning' the voice for every sentence.
         print(f"[TTS] 🧬 Pre-encoding voice signature: {voice_path}")
         prep_start = time.time()
         
         # Load and clip reference audio to 5s if it's long (saves ~15s per chunk)
         import torchaudio
         try:
-            waveform, sample_rate = torchaudio.load(str(voice_path))
-            if waveform.shape[1] > (5 * sample_rate):
+            waveform, sample_rate_ref = torchaudio.load(str(voice_path))
+            if waveform.shape[1] > (5 * sample_rate_ref):
                 print(f"[TTS] ✂️  Clipping long voice prompt to 5s for speed")
-                waveform = waveform[:, :int(5 * sample_rate)]
+                waveform = waveform[:, :int(5 * sample_rate_ref)]
                 temp_voice = "/tmp/speed_ref.wav"
-                torchaudio.save(temp_voice, waveform, sample_rate)
+                torchaudio.save(temp_voice, waveform, sample_rate_ref)
                 voice_path = temp_voice
         except Exception as e:
             print(f"[TTS] ⚠️  Voice clipping skipped: {e}")
@@ -273,15 +271,30 @@ def generate_tts_handler(job):
         # Ensure we use high-speed no-grad mode
         torch.set_grad_enabled(False)
 
+        print(f"\n{'='*60}")
+        print(f"[PROFILER] 🔍 DEEP PERFORMANCE ANALYSIS")
+        print(f"{'='*60}\n")
+
         for i, chunk in enumerate(text_chunks):
             # Log progress for UI
             progress_pct = int((i / len(text_chunks)) * 90)
             log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
             
+            print(f"\n[PROFILER] --- Chunk {i+1}/{len(text_chunks)} ---")
+            print(f"[PROFILER] Text: '{chunk[:50]}...' ({len(chunk)} chars)")
+            
             chunk_start = time.time()
             # SPEED FIX 2: Hard limit on generation length
             limit = int(len(chunk) * 2.2) + 60
-
+            print(f"[PROFILER] Token limit: {limit}")
+            
+            # Sync GPU before timing
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            
+            t0 = time.time()
+            print(f"[PROFILER] ⏱️  Starting generation at t={0:.2f}s...")
+            
             # Generate this specific chunk
             # Forced Zero-Shot Mode (No ICL) for maximum speed
             wavs, sample_rate = model.generate_voice_clone(
@@ -297,8 +310,29 @@ def generate_tts_handler(job):
                 max_new_tokens=limit
             )
             
+            # Sync GPU after generation
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            
+            t1 = time.time()
+            gen_time = t1 - t0
+            
             chunk_time = time.time() - chunk_start
-            print(f"[TTS] ✅ Chunk {i+1} finished in {chunk_time:.2f}s | Tokens/s: {round(limit/chunk_time, 1)}")
+            audio_duration = len(wavs[0]) / sample_rate
+            
+            print(f"[PROFILER] ✅ Generation complete at t={chunk_time:.2f}s")
+            print(f"[PROFILER] 📊 Breakdown:")
+            print(f"[PROFILER]   - Pure generation: {gen_time:.2f}s")
+            print(f"[PROFILER]   - Audio output: {audio_duration:.2f}s")
+            print(f"[PROFILER]   - Real-time ratio: {audio_duration/gen_time:.2f}x")
+            print(f"[PROFILER]   - Tokens/sec: {round(limit/gen_time, 1)}")
+            
+            if torch.cuda.is_available():
+                mem_allocated = torch.cuda.memory_allocated() / 1024**3
+                mem_reserved = torch.cuda.memory_reserved() / 1024**3
+                print(f"[PROFILER]   - GPU Memory: {mem_allocated:.2f}GB allocated, {mem_reserved:.2f}GB reserved")
+            
+            print(f"[PROFILER] Total chunk time: {chunk_time:.2f}s\n")
             
             sr = sample_rate
             all_audio.append(wavs[0])
