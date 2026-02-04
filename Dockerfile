@@ -19,15 +19,15 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Add deadsnakes PPA for Python 3.12
+# Add deadsnakes PPA for Python 3.11
 RUN add-apt-repository ppa:deadsnakes/ppa -y
 
-# Install Python 3.12 and remaining dependencies
+# Install Python 3.11 and remaining dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-dev \
-    python3.12-venv \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
     python3-pip \
     git \
     git-lfs \
@@ -38,19 +38,19 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Set python3.12 as the default python
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
-    update-alternatives --set python3 /usr/bin/python3.12 && \
+# Set python3.11 as the default python
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    update-alternatives --set python3 /usr/bin/python3.11 && \
     ln -sf /usr/bin/python3 /usr/bin/python
 
-# Install pip for Python 3.12 and upgrade
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
-    python3.12 -m pip install --upgrade pip setuptools wheel
+# Install pip for Python 3.11 and upgrade
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && \
+    python3.11 -m pip install --upgrade pip setuptools wheel
 
-# 1. Install PyTorch 2.9.0 stable (MUST match your wheel)
+# 1. Install PyTorch 2.5.1 stable (MUST match your wheel)
 RUN python3 -m pip install --no-cache-dir \
-    torch==2.9.0 \
-    torchaudio==2.9.0 \
+    torch==2.5.1 \
+    torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu124 && \
     python3 -c "import torch; print(f'PyTorch {torch.__version__} installed (CUDA {torch.version.cuda})')"
 
@@ -60,7 +60,7 @@ RUN python3 -m pip install --no-cache-dir \
 COPY requirements.txt .
 RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the speech tokenizer and common models (0.6B version for speed)
+# Pre-download the speech tokenizer and common models
 RUN python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='Qwen/Qwen3-TTS-12Hz-0.6B-Base', filename='config.json')" || echo "Pre-download skipped"
 
 # Copy the rest of the application code
