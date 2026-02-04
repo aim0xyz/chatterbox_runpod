@@ -2,6 +2,7 @@ import runpod
 import os
 import torch
 import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 import base64
 import json
 import io
@@ -74,10 +75,10 @@ def init_model():
         
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
             device_map={"": 0},
-            trust_remote_code=True
-            # ⚠️ DO NOT PASS attn_implementation HERE - it is ignored by qwen-tts
+            trust_remote_code=True,
+            attn_implementation="flash_attention_2"
         )
 
         # Reduce VRAM pressure for serverless concurrency
