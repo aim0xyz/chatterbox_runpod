@@ -75,10 +75,9 @@ def init_model():
         
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
-            dtype=torch.bfloat16,
             device_map={"": 0},
-            trust_remote_code=True,
-            attn_implementation="sdpa"
+            torch_dtype=torch.bfloat16,
+            attn_implementation="kernels-community/flash-attn3"
         )
 
         # Reduce VRAM pressure for serverless concurrency
