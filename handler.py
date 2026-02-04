@@ -16,8 +16,6 @@ from pydub import AudioSegment
 # CONFIGURATION
 # ==========================================
 # Model and Voice Paths
-# DEFAULT TO 0.6B REPO FOR MAXIMUM SPEED (8s target)
-MODEL_NAME_OR_PATH = "Qwen/Qwen3-TTS-12Hz-0.6B-Base" 
 VOICE_ROOT = Path("/runpod-volume/user_voices")
 PRESET_ROOT = Path("/runpod-volume/preset_voices")
 
