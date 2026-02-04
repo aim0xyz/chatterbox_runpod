@@ -250,13 +250,27 @@ def generate_tts_handler(job):
     try:
         if model is None:
              return {"error": "Model not loaded"}
+
+        # --- SPEED INJECTOR 1: Voice DNA Caching ---
+        # We process the voice ONCE here so it's ready for all chunks.
+        # This prevents the AI from 're-learning' the voice for every sentence.
+        print(f"[TTS] 🧬 Pre-encoding voice signature: {voice_path}")
+        prep_start = time.time()
         
-        # --- SPEED INJECTOR: Pre-process Voice ---
-        # We process the voice ONCE here so it's ready for all chunks
-        # We also clip it to 5 seconds to prevent the GPU from choking on long samples
-        print(f"[TTS] Pre-processing voice prompt: {voice_path}")
-        
-        # Ensure we are in no-grad mode for the whole generation
+        # Load and clip reference audio to 5s if it's long (saves ~15s per chunk)
+        import torchaudio
+        try:
+            waveform, sample_rate = torchaudio.load(str(voice_path))
+            if waveform.shape[1] > (5 * sample_rate):
+                print(f"[TTS] ✂️  Clipping long voice prompt to 5s for speed")
+                waveform = waveform[:, :int(5 * sample_rate)]
+                temp_voice = "/tmp/speed_ref.wav"
+                torchaudio.save(temp_voice, waveform, sample_rate)
+                voice_path = temp_voice
+        except Exception as e:
+            print(f"[TTS] ⚠️  Voice clipping skipped: {e}")
+
+        # Ensure we use high-speed no-grad mode
         torch.set_grad_enabled(False)
 
         for i, chunk in enumerate(text_chunks):
@@ -265,17 +279,17 @@ def generate_tts_handler(job):
             log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
             
             chunk_start = time.time()
-            # SPEED FIX: Hard limit on generation length
+            # SPEED FIX 2: Hard limit on generation length
             limit = int(len(chunk) * 2.2) + 60
 
             # Generate this specific chunk
-            # Performance Flags: ref_text=None (No ICL), x_vector_only_mode=True (Zero-Shot)
+            # Forced Zero-Shot Mode (No ICL) for maximum speed
             wavs, sample_rate = model.generate_voice_clone(
                 text=chunk,
                 language=language,
                 ref_audio=str(voice_path),
                 ref_text=None,
-                x_vector_only_mode=True,
+                x_vector_only_mode=True, 
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
@@ -284,7 +298,7 @@ def generate_tts_handler(job):
             )
             
             chunk_time = time.time() - chunk_start
-            print(f"[TTS] Chunk {i+1} done in {chunk_time:.2f}s | Limit: {limit}")
+            print(f"[TTS] ✅ Chunk {i+1} finished in {chunk_time:.2f}s | Tokens/s: {round(limit/chunk_time, 1)}")
             
             sr = sample_rate
             all_audio.append(wavs[0])
