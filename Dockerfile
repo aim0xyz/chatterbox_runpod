@@ -9,29 +9,32 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME="/runpod-volume/.cache/huggingface"
 ENV PYTHONPATH="/app"
 
-# Install system dependencies and add deadsnakes PPA for Python 3.12
+# Install base system dependencies first
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     software-properties-common \
-    ca-certificates && \
-    add-apt-repository ppa:deadsnakes/ppa -y && \
+    ca-certificates \
+    gnupg \
+    curl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python 3.12 and remaining system dependencies
+# Add deadsnakes PPA for Python 3.12
+RUN add-apt-repository ppa:deadsnakes/ppa -y
+
+# Install Python 3.12 and remaining dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-dev \
-    python3.12-distutils \
+    python3.12-venv \
     python3-pip \
     git \
     git-lfs \
     ffmpeg \
     sox \
     libsox-dev \
-    libsndfile1 \
-    curl && \
+    libsndfile1 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
