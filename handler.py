@@ -196,7 +196,7 @@ def init_model():
                         x_vector_only_mode=True, # MUST match generation logic
                         max_new_tokens=5
                     )
-                 print("[ startup] Warm-up complete! Engine is hot.")
+                print("[startup] Warm-up complete! Engine is hot.")
             except Exception as e:
                 print(f"[startup] Warm-up skipped/failed (non-critical): {e}")
         
