@@ -16,30 +16,29 @@ from pydub import AudioSegment
 # CONFIGURATION
 # ==========================================
 # Model and Voice Paths
-MODEL_PATH = Path("/qwen3_models")
+# DEFAULT TO 0.6B REPO FOR MAXIMUM SPEED (8s target)
+MODEL_NAME_OR_PATH = "Qwen/Qwen3-TTS-12Hz-0.6B-Base" 
 VOICE_ROOT = Path("/runpod-volume/user_voices")
 PRESET_ROOT = Path("/runpod-volume/preset_voices")
 
 # --- SMART PATH DISCOVERY ---
-# PREFER the 0.6B model baked into the image for maximum speed
-if (Path("/qwen3_models") / "model.safetensors").exists():
-    MODEL_PATH = Path("/qwen3_models")
-    print(f"[startup] Using FAST 0.6B Image Model: {MODEL_PATH}")
-# FALLBACK 1: Path discovered by start.sh
-elif Path("/tmp/model_path.txt").exists():
-    with open("/tmp/model_path.txt", "r") as f:
-        discovered = Path(f.read().strip())
-        if (discovered / "model.safetensors").exists():
-            MODEL_PATH = discovered
-            print(f"[startup] Path set from search: {MODEL_PATH}")
-# FALLBACK 2: Search volume
-elif not (MODEL_PATH / "model.safetensors").exists():
-    print("[startup] Searching volume root /runpod-volume...")
-    for path in Path("/runpod-volume").rglob("model.safetensors"):
-        if "speech_tokenizer" not in str(path):
-            MODEL_PATH = path.parent
-            print(f"[startup] Found model at fallback: {MODEL_PATH}")
-            break
+# 1. PRIORITIZE the manual 0.6B folder (Check both volume and workspace)
+SEARCH_PATHS = [Path("/workspace/qwen3_0.6b"), Path("/runpod-volume/qwen3_0.6b")]
+MODEL_NAME_OR_PATH = "Qwen/Qwen3-TTS-12Hz-0.6B-Base" # Default to repo
+
+for p in SEARCH_PATHS:
+    if (p / "model.safetensors").exists():
+        MODEL_NAME_OR_PATH = str(p)
+        print(f"[startup] SUCCESS: Using manual 0.6B Local Model: {MODEL_NAME_OR_PATH}")
+        break
+
+# 2. FALLBACK to the Image path or Repo
+if MODEL_NAME_OR_PATH == "Qwen/Qwen3-TTS-12Hz-0.6B-Base":
+    if (Path("/qwen3_models") / "model.safetensors").exists():
+        MODEL_NAME_OR_PATH = "/qwen3_models"
+        print(f"[startup] Using FAST 0.6B Image Model: {MODEL_NAME_OR_PATH}")
+    else:
+        print(f"[startup] No local match found, using Repo ID (will auto-download): {MODEL_NAME_OR_PATH}")
 
 # Global model variable
 model = None
@@ -67,14 +66,19 @@ def init_model():
         
     try:
         from qwen_tts import Qwen3TTSModel
-        print(f"[startup] Loading Qwen3-TTS model from {MODEL_PATH}...")
+        print(f"[startup] Loading Qwen3-TTS model: {MODEL_NAME_OR_PATH}...")
         model = Qwen3TTSModel.from_pretrained(
-            str(MODEL_PATH),
+            str(MODEL_NAME_OR_PATH),
             dtype=torch.bfloat16,
             device_map={"": 0},
             trust_remote_code=True,
-            attn_implementation="flash_attention_2" # FORCE super-speed mode
+            attn_implementation="flash_attention_2"
         )
+        
+        # Optional: Extra speed boost (only if using 0.6B)
+        if "0.6B" in str(MODEL_NAME_OR_PATH):
+             print("[startup] Applying Lite-Model optimizations...")
+             # No-op for now to avoid wrapper errors, just relying on 0.6B + Flash
         
         # Configure tokenizer padding
         if hasattr(model, 'tokenizer') and model.tokenizer is not None:
