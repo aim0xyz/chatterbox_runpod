@@ -47,11 +47,11 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
     python3.12 -m pip install --upgrade pip setuptools wheel
 
-# 1. Install PyTorch with CUDA 12.4 support
-RUN python3 -m pip install --no-cache-dir \
+# 1. Install PyTorch 2.9+ nightly (required for flash-attn 2.8.3+cu12torch2.9)
+RUN python3 -m pip install --no-cache-dir --pre \
     torch \
     torchaudio \
-    --extra-index-url https://download.pytorch.org/whl/cu124
+    --index-url https://download.pytorch.org/whl/nightly/cu124
 
 # 2. Flash Attention will be installed from volume in start.sh
 
