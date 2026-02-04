@@ -1,4 +1,7 @@
 #!/bin/bash
+set -e
+
+echo "[startup] Starting Qwen3-TTS worker..."
 
 # --- FLASH ATTENTION INSTALLATION FROM VOLUME ---
 # Install the Python 3.12 compatible wheel from volume
