@@ -22,23 +22,18 @@ VOICE_ROOT = Path("/runpod-volume/user_voices")
 PRESET_ROOT = Path("/runpod-volume/preset_voices")
 
 # --- SMART PATH DISCOVERY ---
-# 1. PRIORITIZE the manual 0.6B folder (Check both volume and workspace)
-SEARCH_PATHS = [Path("/workspace/qwen3_0.6b"), Path("/runpod-volume/qwen3_0.6b")]
-MODEL_NAME_OR_PATH = "Qwen/Qwen3-TTS-12Hz-0.6B-Base" # Default to repo
+# Use existing 1.7B Base model (Flash variant doesn't exist)
+MODEL_NAME_OR_PATH = "/runpod-volume/qwen3_models"  # Your existing 1.7B
 
-for p in SEARCH_PATHS:
-    if (p / "model.safetensors").exists():
-        MODEL_NAME_OR_PATH = str(p)
-        print(f"[startup] SUCCESS: Using manual 0.6B Local Model: {MODEL_NAME_OR_PATH}")
-        break
+if not (Path(MODEL_NAME_OR_PATH) / "model.safetensors").exists():
+    MODEL_NAME_OR_PATH = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"  # Fallback to repo
+    print(f"[startup] Model not found locally, will download: {MODEL_NAME_OR_PATH}")
+else:
+    print(f"[startup] Using existing 1.7B Base model: {MODEL_NAME_OR_PATH}")
 
-# 2. FALLBACK to the Image path or Repo
-if MODEL_NAME_OR_PATH == "Qwen/Qwen3-TTS-12Hz-0.6B-Base":
-    if (Path("/qwen3_models") / "model.safetensors").exists():
-        MODEL_NAME_OR_PATH = "/qwen3_models"
-        print(f"[startup] Using FAST 0.6B Image Model: {MODEL_NAME_OR_PATH}")
-    else:
-        print(f"[startup] No local match found, using Repo ID (will auto-download): {MODEL_NAME_OR_PATH}")
+# --- OPTIMIZATION SETTINGS ---
+# Since FA2 isn't supported in the Talker module, we'll use torch.compile() instead
+USE_TORCH_COMPILE = True  # Set to False to skip compilation (faster startup, slower generation)
 
 # Global model variable
 model = None
@@ -201,9 +196,27 @@ def init_model():
                         x_vector_only_mode=True, # MUST match generation logic
                         max_new_tokens=5
                     )
-                print("[startup] Warm-up complete! Engine is hot.")
+                 print("[ startup] Warm-up complete! Engine is hot.")
             except Exception as e:
                 print(f"[startup] Warm-up skipped/failed (non-critical): {e}")
+        
+        # --- TORCH COMPILE OPTIMIZATION ---
+        # Since FA2 isn't active in Talker, use torch.compile() for 2-3x speedup
+        if USE_TORCH_COMPILE:
+            print("\n[startup] 🔥 Compiling model with torch.compile() for speedup...")
+            print("[startup] ⏱️  This will take 1-2 minutes but makes generation 2-3x faster")
+            print("[startup] 💡 First generation will be slow (tracing), then very fast")
+            try:
+                # Compile for maximum speed
+                model.generate_voice_clone = torch.compile(
+                    model.generate_voice_clone,
+                    mode="reduce-overhead",
+                    fullgraph=False  # More flexible with complex graphs
+                )
+                print("[startup] ✅ Model compiled successfully!")
+            except Exception as e:
+                print(f"[startup] ⚠️  Compilation failed: {e}")
+                print(f"[startup] Continuing with uncompiled model")
         
         print("[startup] Model loaded successfully into GPU!")
     except Exception as e:

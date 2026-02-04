@@ -8,4 +8,6 @@ accelerate
 huggingface_hub
 soundfile
 pydub
+# Latest qwen-tts from PyPI (may or may not have FA3 support)
 qwen-tts
+# Note: flash-attn is installed via wheel in start.sh (v2.8.3)
