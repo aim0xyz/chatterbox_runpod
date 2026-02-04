@@ -32,7 +32,7 @@ else:
 
 # --- OPTIMIZATION SETTINGS ---
 # Since FA2 isn't supported in the Talker module, we'll use torch.compile() instead
-USE_TORCH_COMPILE = True  # Set to False to skip compilation (faster startup, slower generation)
+USE_TORCH_COMPILE = False  # Set to False to skip compilation (faster startup, slower generation)
 
 # Global model variable
 model = None

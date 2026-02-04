@@ -29,6 +29,8 @@ RUN apt-get update && \
     python3.11-dev \
     python3.11-venv \
     python3-pip \
+    build-essential \
+    g++ \
     git \
     git-lfs \
     ffmpeg \
