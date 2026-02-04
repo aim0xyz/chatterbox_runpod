@@ -84,6 +84,63 @@ def init_model():
             model.tokenizer.padding_side = 'left'
             model.tokenizer.pad_token = model.tokenizer.eos_token
 
+        # --- FLASH ATTENTION VERIFICATION ---
+        print(f"\n{'='*60}")
+        print(f"[FA2 CHECK] 🔍 Verifying Flash Attention Status")
+        print(f"{'='*60}")
+        
+        # Check 1: Is flash_attn installed?
+        try:
+            import flash_attn
+            print(f"[FA2 CHECK] ✅ flash_attn module installed (v{flash_attn.__version__})")
+        except ImportError:
+            print(f"[FA2 CHECK] ❌ flash_attn module NOT installed")
+        
+        # Check 2: What attention implementation is the model configured to use?
+        if hasattr(model, 'config'):
+            attn_impl = getattr(model.config, '_attn_implementation', 'unknown')
+            print(f"[FA2 CHECK] Model config attn_implementation: {attn_impl}")
+            if attn_impl == 'flash_attention_2':
+                print(f"[FA2 CHECK] ✅ Model is CONFIGURED to use Flash Attention 2")
+            else:
+                print(f"[FA2 CHECK] ⚠️  Model is NOT configured for FA2 (using: {attn_impl})")
+        
+        # Check 3: Inspect actual model layers for Flash Attention usage
+        fa2_found = False
+        standard_attn_found = False
+        checked_layers = 0
+        
+        for name, module in model.named_modules():
+            checked_layers += 1
+            module_type = type(module).__name__
+            
+            # Look for Flash Attention classes
+            if 'Flash' in module_type or 'flash' in module_type.lower():
+                fa2_found = True
+                print(f"[FA2 CHECK] ✅ Found FA2 layer: {name} ({module_type})")
+                if checked_layers > 5:  # Only show first few to avoid spam
+                    break
+            
+            # Look for standard attention (Qwen2Attention, etc.)
+            if 'Attention' in module_type and 'Flash' not in module_type:
+                if not standard_attn_found:
+                    standard_attn_found = True
+                    print(f"[FA2 CHECK] ⚠️  Found standard attention: {name} ({module_type})")
+        
+        # Summary
+        print(f"\n[FA2 CHECK] 📊 VERDICT:")
+        if fa2_found:
+            print(f"[FA2 CHECK] ✅ Flash Attention 2 IS ACTIVE in model layers")
+            print(f"[FA2 CHECK] 🚀 Expected speed: 100+ tokens/sec on L4/A5000")
+        elif standard_attn_found:
+            print(f"[FA2 CHECK] ❌ Flash Attention 2 NOT ACTIVE (using standard attention)")
+            print(f"[FA2 CHECK] 🐌 Expected speed: 20-30 tokens/sec (SLOW)")
+            print(f"[FA2 CHECK] 💡 This explains the performance gap!")
+        else:
+            print(f"[FA2 CHECK] ⚠️  Could not determine attention implementation")
+        
+        print(f"{'='*60}\n")
+
         # --- THE WARM-UP ---
         # This forces the 'code_predictor' and 'speaker_encoder' to initialize NOW
         print("[startup] Warming up model engine...")
