@@ -77,7 +77,7 @@ def init_model():
             str(MODEL_NAME_OR_PATH),
             device_map={"": 0},
             torch_dtype=torch.bfloat16,
-            attn_implementation="kernels-community/flash-attn3"
+            attn_implementation="flash_attention_2"
         )
 
         # Reduce VRAM pressure for serverless concurrency
