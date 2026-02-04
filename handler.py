@@ -86,18 +86,27 @@ def init_model():
 
         # --- THE WARM-UP ---
         # This forces the 'code_predictor' and 'speaker_encoder' to initialize NOW
-        # so they don't slow down the actual story generation later.
         print("[startup] Warming up model engine...")
-        dummy_ref = str(PRESET_ROOT / "en/Huggy.wav")
+        dummy_ref = str(PRESET_ROOT / "en/Owen.wav") # Owen is reliably 24khz
+        if not os.path.exists(dummy_ref):
+            # Fallback to any file in presets
+            for f in PRESET_ROOT.rglob("*.wav"):
+                dummy_ref = str(f)
+                break
+
         if os.path.exists(dummy_ref):
-            with torch.inference_mode():
-                model.generate_voice_clone(
-                    text="Warmup.", 
-                    language="english", 
-                    ref_audio=dummy_ref,
-                    max_new_tokens=10
-                )
-            print("[startup] Warm-up complete! Engine is hot and ready.")
+            try:
+                with torch.inference_mode():
+                    model.generate_voice_clone(
+                        text="Hi.", 
+                        language="english", 
+                        ref_audio=dummy_ref,
+                        x_vector_only_mode=True, # MUST match generation logic
+                        max_new_tokens=5
+                    )
+                print("[startup] Warm-up complete! Engine is hot.")
+            except Exception as e:
+                print(f"[startup] Warm-up skipped/failed (non-critical): {e}")
         
         print("[startup] Model loaded successfully into GPU!")
     except Exception as e:
@@ -267,11 +276,12 @@ def generate_tts_handler(job):
                 text=chunk,
                 language=language,
                 ref_audio=str(voice_path),
+                ref_text=None,             # FORCE skip ICL mode for speed
+                x_vector_only_mode=True,   # FORCE high-speed Zero-Shot mode
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
                 top_k=top_k,
-                x_vector_only_mode=True,
                 max_new_tokens=limit
             )
             
