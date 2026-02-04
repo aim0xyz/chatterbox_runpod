@@ -96,48 +96,88 @@ def init_model():
         except ImportError:
             print(f"[FA2 CHECK] ❌ flash_attn module NOT installed")
         
-        # Check 2: What attention implementation is the model configured to use?
-        if hasattr(model, 'config'):
-            attn_impl = getattr(model.config, '_attn_implementation', 'unknown')
-            print(f"[FA2 CHECK] Model config attn_implementation: {attn_impl}")
-            if attn_impl == 'flash_attention_2':
-                print(f"[FA2 CHECK] ✅ Model is CONFIGURED to use Flash Attention 2")
-            else:
-                print(f"[FA2 CHECK] ⚠️  Model is NOT configured for FA2 (using: {attn_impl})")
+        # Check 2: Inspect Qwen3TTSModel wrapper
+        print(f"[FA2 CHECK] Model type: {type(model).__name__}")
         
-        # Check 3: Inspect actual model layers for Flash Attention usage
+        # Check 2.5: Verify GPU usage
+        print(f"\n[FA2 CHECK] 🖥️  Device Check:")
+        print(f"[FA2 CHECK] CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"[FA2 CHECK] CUDA device: {torch.cuda.get_device_name(0)}")
+            print(f"[FA2 CHECK] Current device: cuda:{torch.cuda.current_device()}")
+        
+        # Check where model parameters are actually located
+        cpu_params = 0
+        gpu_params = 0
+        try:
+            for name, param in model.named_parameters():
+                if param.device.type == 'cpu':
+                    cpu_params += 1
+                    if cpu_params == 1:  # Only print first one
+                        print(f"[FA2 CHECK] ⚠️  Found CPU parameter: {name}")
+                elif param.device.type == 'cuda':
+                    gpu_params += 1
+                    if gpu_params == 1:  # Only print first one
+                        print(f"[FA2 CHECK] ✅ Found GPU parameter: {name} (device={param.device})")
+        except:
+            print(f"[FA2 CHECK] ⚠️  Could not iterate parameters")
+        
+        if cpu_params > 0:
+            print(f"[FA2 CHECK] ❌ CRITICAL: {cpu_params} parameters on CPU!")
+            print(f"[FA2 CHECK] 🐌 This WILL cause 10-20x slowdown!")
+        elif gpu_params > 0:
+            print(f"[FA2 CHECK] ✅ All {gpu_params} parameters on GPU")
+        
+        # Try to find the underlying transformer model inside the wrapper
+        underlying_model = None
+        if hasattr(model, 'model'):
+            underlying_model = model.model
+            print(f"[FA2 CHECK] Found underlying model at: model.model")
+        elif hasattr(model, 'talker'):
+            underlying_model = model.talker
+            print(f"[FA2 CHECK] Found underlying model at: model.talker")
+        
+        # Check config of underlying model
+        if underlying_model and hasattr(underlying_model, 'config'):
+            attn_impl = getattr(underlying_model.config, '_attn_implementation', 'unknown')
+            print(f"[FA2 CHECK] Underlying model attn_implementation: {attn_impl}")
+            if attn_impl == 'flash_attention_2':
+                print(f"[FA2 CHECK] ✅ Underlying model CONFIGURED for FA2")
+            else:
+                print(f"[FA2 CHECK] ❌ Underlying model NOT configured for FA2 (using: {attn_impl})")
+        
+        # Check 3: Look for Flash Attention in the model's submodules
         fa2_found = False
         standard_attn_found = False
-        checked_layers = 0
         
-        for name, module in model.named_modules():
-            checked_layers += 1
-            module_type = type(module).__name__
+        try:
+            # Try to iterate through modules (works for standard PyTorch models)
+            search_model = underlying_model if underlying_model else model
             
-            # Look for Flash Attention classes
-            if 'Flash' in module_type or 'flash' in module_type.lower():
-                fa2_found = True
-                print(f"[FA2 CHECK] ✅ Found FA2 layer: {name} ({module_type})")
-                if checked_layers > 5:  # Only show first few to avoid spam
-                    break
-            
-            # Look for standard attention (Qwen2Attention, etc.)
-            if 'Attention' in module_type and 'Flash' not in module_type:
-                if not standard_attn_found:
-                    standard_attn_found = True
-                    print(f"[FA2 CHECK] ⚠️  Found standard attention: {name} ({module_type})")
+            if hasattr(search_model, 'named_modules'):
+                for name, module in search_model.named_modules():
+                    module_type = type(module).__name__
+                    
+                    if 'Flash' in module_type or 'flash' in module_type.lower():
+                        fa2_found = True
+                        print(f"[FA2 CHECK] ✅ Found FA2 layer: {name} ({module_type})")
+                        break
+                    
+                    if 'Attention' in module_type and 'Flash' not in module_type and not standard_attn_found:
+                        standard_attn_found = True
+                        print(f"[FA2 CHECK] ⚠️  Found standard attention: {name} ({module_type})")
+        except Exception as e:
+            print(f"[FA2 CHECK] ⚠️  Could not inspect model layers: {e}")
         
         # Summary
         print(f"\n[FA2 CHECK] 📊 VERDICT:")
         if fa2_found:
-            print(f"[FA2 CHECK] ✅ Flash Attention 2 IS ACTIVE in model layers")
-            print(f"[FA2 CHECK] 🚀 Expected speed: 100+ tokens/sec on L4/A5000")
-        elif standard_attn_found:
-            print(f"[FA2 CHECK] ❌ Flash Attention 2 NOT ACTIVE (using standard attention)")
-            print(f"[FA2 CHECK] 🐌 Expected speed: 20-30 tokens/sec (SLOW)")
-            print(f"[FA2 CHECK] 💡 This explains the performance gap!")
+            print(f"[FA2 CHECK] ✅ Flash Attention 2 IS ACTIVE")
+            print(f"[FA2 CHECK] 🚀 Expected: 100+ tokens/sec on L4/A5000")
         else:
-            print(f"[FA2 CHECK] ⚠️  Could not determine attention implementation")
+            print(f"[FA2 CHECK] ❌ Flash Attention 2 NOT DETECTED")
+            print(f"[FA2 CHECK] 🐌 This explains 13-23 tokens/sec performance")
+            print(f"[FA2 CHECK] 💡 qwen-tts may not support FA2 acceleration")
         
         print(f"{'='*60}\n")
 
