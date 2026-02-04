@@ -75,7 +75,7 @@ def init_model():
         
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map={"": 0},
             trust_remote_code=True,
             attn_implementation="flash_attention_2"
