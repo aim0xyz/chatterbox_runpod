@@ -47,12 +47,13 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
     python3.12 -m pip install --upgrade pip setuptools wheel
 
-# 1. Install PyTorch 2.9.x (required for flash-attn 2.8.3+cu12torch2.9)
+# 1. Install PyTorch nightly (required for torch 2.9 ABI compatibility with your flash-attn wheel)
 RUN python3 -m pip install --no-cache-dir --pre \
     torch \
     torchaudio \
-    --index-url https://download.pytorch.org/whl/test/cu124 \
-    --extra-index-url https://pypi.org/simple
+    --index-url https://download.pytorch.org/whl/nightly/cu124 \
+    --extra-index-url https://pypi.org/simple && \
+    python3 -c "import torch; print(f'PyTorch installed: {torch.__version__}')"
 
 # 2. Flash Attention will be installed from volume in start.sh
 
