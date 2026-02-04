@@ -8,11 +8,21 @@ echo "[startup] Starting Qwen3-TTS worker..."
 FLASH_ATTN_WHEEL="/runpod-volume/qwen3_models/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 
 if [ -f "$FLASH_ATTN_WHEEL" ]; then
-    echo "[startup] Installing Flash Attention from volume: $FLASH_ATTN_WHEEL"
-    python3 -m pip install "$FLASH_ATTN_WHEEL" --no-deps
+    echo "[startup] Verifying Flash Attention wheel compatibility..."
+    python3 -c "
+import sys, pkg_resources
+try:
+    torch_ver = pkg_resources.parse_version('$(python3 -c \"import torch; print(torch.__version__)\")')
+    assert torch_ver.major == 2 and torch_ver.minor == 9, f'PyTorch version mismatch! Expected 2.9.x, found {torch_ver}'
+    print(f'✅ Wheel compatible with PyTorch {torch_ver}')
+except Exception as e:
+    print(f'❌ Validation error: {e}')
+    sys.exit(1)
+"
+    python3 -m pip install "$FLASH_ATTN_WHEEL" --force-reinstall --no-deps
 else
-    echo "[startup] ⚠️  Flash Attention wheel not found at: $FLASH_ATTN_WHEEL"
-    echo "[startup] ⚠️  Model will run without Flash Attention (slower)"
+    echo "❌ CRITICAL: Flash Attention wheel missing at $FLASH_ATTN_WHEEL!"
+    exit 1  # Fail fast instead of silent degradation
 fi
 
 # Start the handler

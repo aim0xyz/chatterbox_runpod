@@ -57,7 +57,15 @@ def init_model():
         return
         
     try:
-        from qwen_tts import Qwen3TTSModel
+        # ⚠️ CRITICAL: SET ENV VARS BEFORE ANY MODEL IMPORTS ⚠️
+        import os
+        os.environ["FLASH_ATTENTION_AVAILABLE"] = "1"  # Primary trigger
+        os.environ["USE_FLASH_ATTENTION"] = "1"         # Redundant safety net
+        os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"  # Some forks check this
+        
+        # NOW import model AFTER env vars are set
+        from qwen_tts import Qwen3TTSModel  # Must come AFTER env vars!
+        
         print(f"[startup] Loading Qwen3-TTS model: {MODEL_NAME_OR_PATH}...")
         
         # Speed Optimization: Enable TF32 for faster math on modern GPUs
@@ -68,9 +76,15 @@ def init_model():
             str(MODEL_NAME_OR_PATH),
             dtype=torch.bfloat16,
             device_map={"": 0},
-            trust_remote_code=True,
-            attn_implementation="flash_attention_2"
+            trust_remote_code=True
+            # ⚠️ DO NOT PASS attn_implementation HERE - it is ignored by qwen-tts
         )
+
+        # Reduce VRAM pressure for serverless concurrency
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            print(f"[VRAM] Clean slate: {torch.cuda.memory_allocated()/1e9:.2f}GB used")
         
         # Configure tokenizer
         if hasattr(model, 'tokenizer') and model.tokenizer is not None:
@@ -132,12 +146,22 @@ def init_model():
         
         # Check config of underlying model
         if underlying_model and hasattr(underlying_model, 'config'):
-            attn_impl = getattr(underlying_model.config, '_attn_implementation', 'unknown')
-            print(f"[FA2 CHECK] Underlying model attn_implementation: {attn_impl}")
-            if attn_impl == 'flash_attention_2':
-                print(f"[FA2 CHECK] ✅ Underlying model CONFIGURED for FA2")
+            actual_impl = getattr(underlying_model.config, '_attn_implementation_autoset', 'unknown')
+            print(f"[FA2] Actual attention implementation: {actual_impl}")
+            if actual_impl == 'flash_attention_2':
+                print(f"[FA2] ✅ Model IS using Flash Attention 2")
             else:
-                print(f"[FA2 CHECK] ❌ Underlying model NOT configured for FA2 (using: {attn_impl})")
+                print(f"[FA2] ⚠️  WARNING: Model NOT using Flash Attention! (Using: {actual_impl})")
+
+        # Verify Flash Attention is ACTIVE in the actual inference path
+        search_model = underlying_model if underlying_model else model
+        if hasattr(search_model, 'layers'):
+            first_layer_attn = type(search_model.layers[0].self_attn).__name__
+            print(f"[FA2] First attention layer type: {first_layer_attn}")
+            if "Flash" in first_layer_attn:
+                print("✅ FLASH ATTENTION CONFIRMED ACTIVE")
+            else:
+                print("❌ WARNING: Standard attention layer detected!")
         
         # Check 3: Look for Flash Attention in the model's submodules
         fa2_found = False
@@ -163,14 +187,14 @@ def init_model():
             print(f"[FA2 CHECK] ⚠️  Could not inspect model layers: {e}")
         
         # Summary
-        print(f"\n[FA2 CHECK] 📊 VERDICT:")
+        print(f"\n[FA2] 📊 VERDICT:")
         if fa2_found:
-            print(f"[FA2 CHECK] ✅ Flash Attention 2 IS ACTIVE")
-            print(f"[FA2 CHECK] 🚀 Expected: 100+ tokens/sec on L4/A5000")
+            print(f"[FA2] ✅ Flash Attention 2 IS ACTIVE")
+            print(f"[FA2] 🚀 Expected: 100+ tokens/sec on L4/A5000")
         else:
-            print(f"[FA2 CHECK] ❌ Flash Attention 2 NOT DETECTED")
-            print(f"[FA2 CHECK] 🐌 This explains 13-23 tokens/sec performance")
-            print(f"[FA2 CHECK] 💡 qwen-tts may not support FA2 acceleration")
+            print(f"[FA2] ❌ Flash Attention 2 NOT DETECTED")
+            print(f"[FA2] 🐌 This explains 13-23 tokens/sec performance")
+            print(f"[FA2] 💡 qwen-tts may not support FA2 acceleration")
         
         print(f"{'='*60}\n")
 
