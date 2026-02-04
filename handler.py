@@ -58,15 +58,19 @@ LANG_MAP = {
 }
 
 def init_model():
-    """Load the Qwen3-TTS model with singleton check."""
+    """Load the Qwen3-TTS model with singleton check and warm-up."""
     global model
     if model is not None:
-        print("[startup] Model already loaded, skipping...")
         return
         
     try:
         from qwen_tts import Qwen3TTSModel
         print(f"[startup] Loading Qwen3-TTS model: {MODEL_NAME_OR_PATH}...")
+        
+        # Speed Optimization: Enable TF32 for faster math on modern GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
             dtype=torch.bfloat16,
@@ -75,17 +79,26 @@ def init_model():
             attn_implementation="flash_attention_2"
         )
         
-        # Optional: Extra speed boost (only if using 0.6B)
-        if "0.6B" in str(MODEL_NAME_OR_PATH):
-             print("[startup] Applying Lite-Model optimizations...")
-             # No-op for now to avoid wrapper errors, just relying on 0.6B + Flash
-        
-        # Configure tokenizer padding
+        # Configure tokenizer
         if hasattr(model, 'tokenizer') and model.tokenizer is not None:
             model.tokenizer.padding_side = 'left'
             model.tokenizer.pad_token = model.tokenizer.eos_token
+
+        # --- THE WARM-UP ---
+        # This forces the 'code_predictor' and 'speaker_encoder' to initialize NOW
+        # so they don't slow down the actual story generation later.
+        print("[startup] Warming up model engine...")
+        dummy_ref = str(PRESET_ROOT / "en/Huggy.wav")
+        if os.path.exists(dummy_ref):
+            with torch.inference_mode():
+                model.generate_voice_clone(
+                    text="Warmup.", 
+                    language="english", 
+                    ref_audio=dummy_ref,
+                    max_new_tokens=10
+                )
+            print("[startup] Warm-up complete! Engine is hot and ready.")
         
-        # NOTE: torch.compile() is disabled to prevent graph breaks
         print("[startup] Model loaded successfully into GPU!")
     except Exception as e:
         print(f"[startup] Error loading model: {e}")
