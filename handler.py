@@ -32,7 +32,7 @@ else:
 
 # --- OPTIMIZATION SETTINGS ---
 # Since FA2 isn't supported in the Talker module, we'll use torch.compile() instead
-USE_TORCH_COMPILE = False  # Set to False to skip compilation (faster startup, slower generation)
+USE_TORCH_COMPILE = True  # Set to False to skip compilation (faster startup, slower generation)
 
 # Global model variable
 model = None
@@ -78,7 +78,7 @@ def init_model():
             dtype=torch.bfloat16,
             device_map={"": 0},
             trust_remote_code=True,
-            attn_implementation="flash_attention_3"
+            attn_implementation="sdpa"
         )
 
         # Reduce VRAM pressure for serverless concurrency
