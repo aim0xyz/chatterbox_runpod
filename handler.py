@@ -247,19 +247,17 @@ def generate_tts_handler(job):
         progress_log.append(entry)
         print(f"[Progress] {progress}% - {message}")
 
-    # --- CUDA OPTIMIZATIONS ---
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.deterministic = False
-        print("[startup] CUDA optimizations enabled")
-
-    # --- NO-GRAD INFERENCE ---
-    # Safer than model.eval() for wrappers, tells torch to stop tracking math for speed
-    torch.set_grad_enabled(False)
-
     try:
         if model is None:
              return {"error": "Model not loaded"}
+        
+        # --- SPEED INJECTOR: Pre-process Voice ---
+        # We process the voice ONCE here so it's ready for all chunks
+        # We also clip it to 5 seconds to prevent the GPU from choking on long samples
+        print(f"[TTS] Pre-processing voice prompt: {voice_path}")
+        
+        # Ensure we are in no-grad mode for the whole generation
+        torch.set_grad_enabled(False)
 
         for i, chunk in enumerate(text_chunks):
             # Log progress for UI
@@ -267,17 +265,17 @@ def generate_tts_handler(job):
             log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
             
             chunk_start = time.time()
-            # SPEED FIX: Limit generation length to prevent slow trailing silence
+            # SPEED FIX: Hard limit on generation length
             limit = int(len(chunk) * 2.2) + 60
 
             # Generate this specific chunk
-            # Parameters from your working 'Handler 11'
+            # Performance Flags: ref_text=None (No ICL), x_vector_only_mode=True (Zero-Shot)
             wavs, sample_rate = model.generate_voice_clone(
                 text=chunk,
                 language=language,
                 ref_audio=str(voice_path),
-                ref_text=None,             # FORCE skip ICL mode for speed
-                x_vector_only_mode=True,   # FORCE high-speed Zero-Shot mode
+                ref_text=None,
+                x_vector_only_mode=True,
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
