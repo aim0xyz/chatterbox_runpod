@@ -1,5 +1,5 @@
-# Use NVIDIA CUDA 12.4.1 runtime image (smaller, no compilation tools needed)
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# Use NVIDIA CUDA 12.8 runtime image (latest CUDA 12.x with best optimizations)
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 # Set the working directory in the container
 WORKDIR /app
@@ -9,12 +9,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME="/runpod-volume/.cache/huggingface"
 ENV PYTHONPATH="/app"
 
-# Install Python 3.12 and core system dependencies (per Qwen3-TTS README)
+# Install system dependencies and add deadsnakes PPA for Python 3.12
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update && \
+    software-properties-common \
+    ca-certificates && \
+    add-apt-repository ppa:deadsnakes/ppa -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python 3.12 and remaining system dependencies
+RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-dev \
