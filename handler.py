@@ -12,6 +12,8 @@ import soundfile as sf
 import numpy as np
 from pathlib import Path
 from pydub import AudioSegment
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
 
 # ==========================================
 # CONFIGURATION
@@ -314,7 +316,34 @@ def save_base64_audio(b64_data, dest_path):
         return True
     except Exception as e:
         print(f"Error saving audio: {e}")
+        return True
+    except Exception as e:
+        print(f"Error saving audio: {e}")
         return False
+
+def decrypt_voice(encrypted_base64, key_base64):
+    """Decrypt the voice file in memory."""
+    try:
+        encrypted_bytes = base64.b64decode(encrypted_base64)
+        key = base64.b64decode(key_base64)
+
+        # First 16 bytes are the IV
+        iv = encrypted_bytes[:16]
+        encrypted_data = encrypted_bytes[16:]
+
+        # Decrypt
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+        decryptor = cipher.decryptor()
+        decrypted_padded = decryptor.update(encrypted_data) + decryptor.finalize()
+
+        # Remove PKCS7 padding
+        unpadder = padding.PKCS7(128).unpadder()
+        voice_bytes = unpadder.update(decrypted_padded) + unpadder.finalize()
+
+        return voice_bytes
+    except Exception as e:
+        print(f"Decryption error: {e}")
+        return None
 
 # ==========================================
 # HANDLERS
@@ -328,6 +357,10 @@ def generate_tts_handler(job):
     preset_voice = inp.get("preset_voice")
     voice_id = inp.get("voice_id") or inp.get("embedding_filename")
     
+    # Encryption parameters
+    encrypted_voice = inp.get("encrypted_voice")
+    encryption_key = inp.get("encryption_key")
+    
     # Translate language code to full name (e.g. 'de' -> 'german')
     language = LANG_MAP.get(lang_code.lower(), "auto")
     
@@ -340,8 +373,31 @@ def generate_tts_handler(job):
     if not text:
         return {"error": "No text provided"}
 
+        return {"error": "No text provided"}
+
     # Find prompt audio
-    voice_path = find_voice(user_id=user_id, voice_id=voice_id, preset=preset_voice)
+    voice_path = None
+    
+    # Case 1: Encrypted Voice (New Secure Flow)
+    if encrypted_voice and encryption_key:
+        print(f"[TTS] 🔒 Decrypting secure voice in memory...")
+        voice_bytes = decrypt_voice(encrypted_voice, encryption_key)
+        if not voice_bytes:
+            return {"error": "Failed to decrypt voice"}
+            
+        # Create a temp file in RAM disk (/dev/shm) to avoid touching physical disk
+        # Qwen3TTSModel likely needs a file path
+        # Using a unique name to avoid collisions in concurrent requests
+        temp_voice_path = f"/dev/shm/temp_voice_{int(time.time()*1000)}_{os.getpid()}.wav"
+        with open(temp_voice_path, "wb") as f:
+            f.write(voice_bytes)
+        voice_path = Path(temp_voice_path)
+        print(f"[TTS] ✅ Voice decrypted to RAM disk: {voice_path}")
+        
+    # Case 2: Standard Lookup (Legacy/Preset)
+    else:
+        voice_path = find_voice(user_id=user_id, voice_id=voice_id, preset=preset_voice)
+        
     if not voice_path:
         return {"error": f"Voice not found: {preset_voice or voice_id}"}
 
@@ -510,6 +566,14 @@ def generate_tts_handler(job):
     except Exception as e:
         print(f"Generation error: {e}")
         return {"error": str(e)}
+    finally:
+        # Cleanup temp file if it was created in /dev/shm
+        if voice_path and str(voice_path).startswith("/dev/shm/") and os.path.exists(voice_path):
+            try:
+                os.remove(voice_path)
+                print(f"[Cleanup] Removed temp voice file: {voice_path}")
+            except Exception as e:
+                print(f"[Cleanup] Error removing temp file: {e}")
 
 def clone_voice_handler(job):
     """

@@ -9,3 +9,4 @@ huggingface_hub
 soundfile
 pydub
 
+cryptography
