@@ -77,8 +77,8 @@ def init_model():
         
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
-            device_map={"": 0},
-            torch_dtype=torch.bfloat16,
+            device_map="cuda:0",
+            dtype=torch.bfloat16,
             attn_implementation="flash_attention_2"
         )
 
@@ -382,6 +382,80 @@ def preprocess_text_for_natural_speech(text):
     return text.strip()
 
 
+def normalize_audio_loudness(audio, sr, target_dbfs=-14.0):
+    """Normalize audio loudness using RMS-based gain.
+    
+    Applies gain to bring the audio to a consistent loudness level.
+    Target is -14 dBFS which is the standard for spoken word / audiobooks.
+    """
+    if len(audio) == 0:
+        return audio
+    
+    # Calculate current RMS
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    if rms < 1e-8:  # Near-silent audio
+        print(f"[normalize] ⚠️  Audio is near-silent (RMS={rms:.6f}), skipping normalization")
+        return audio
+    
+    # Calculate target RMS from dBFS
+    target_rms = 10 ** (target_dbfs / 20.0)  # -14 dBFS ≈ 0.1995
+    
+    # Calculate required gain
+    gain = target_rms / rms
+    
+    # Cap gain to avoid amplifying noise excessively
+    max_gain = 8.0
+    if gain > max_gain:
+        print(f"[normalize] ⚠️  Gain capped at {max_gain}x (original would be {gain:.1f}x)")
+        gain = max_gain
+    
+    print(f"[normalize] 🔊 RMS: {rms:.4f} → target {target_rms:.4f} (gain={gain:.2f}x)")
+    
+    # Apply gain
+    normalized = audio * gain
+    
+    # Hard clip to prevent distortion
+    normalized = np.clip(normalized, -0.999, 0.999).astype(np.float32)
+    
+    final_rms = float(np.sqrt(np.mean(normalized ** 2)))
+    print(f"[normalize] ✅ Final RMS: {final_rms:.4f} ({20 * np.log10(final_rms + 1e-10):.1f} dBFS)")
+    
+    return normalized
+
+
+def normalize_reference_audio(voice_path, sr=24000):
+    """Normalize the reference voice recording for better voice DNA extraction.
+    
+    A low-volume reference leads to low-volume output. This ensures the
+    voice signature is extracted from a well-leveled signal.
+    """
+    import torchaudio
+    try:
+        waveform, sample_rate_ref = torchaudio.load(str(voice_path))
+        audio_np = waveform.squeeze().numpy()
+        
+        rms = float(np.sqrt(np.mean(audio_np ** 2)))
+        if rms < 0.01:  # Very quiet recording
+            print(f"[ref_norm] 🔇 Reference audio is quiet (RMS={rms:.4f}), normalizing...")
+            target_rms = 0.15  # Moderate level for reference
+            gain = min(target_rms / max(rms, 1e-8), 6.0)
+            audio_np = np.clip(audio_np * gain, -0.999, 0.999).astype(np.float32)
+            
+            # Save normalized reference
+            import torch
+            normalized_waveform = torch.from_numpy(audio_np).unsqueeze(0)
+            temp_path = "/tmp/normalized_ref.wav"
+            torchaudio.save(temp_path, normalized_waveform, sample_rate_ref)
+            print(f"[ref_norm] ✅ Reference normalized (gain={gain:.2f}x)")
+            return temp_path
+        else:
+            print(f"[ref_norm] ✅ Reference audio level OK (RMS={rms:.4f})")
+            return str(voice_path)
+    except Exception as e:
+        print(f"[ref_norm] ⚠️  Reference normalization skipped: {e}")
+        return str(voice_path)
+
+
 def split_into_natural_chunks(text, max_chars=300):
     """Split text into chunks that respect natural speech boundaries.
     
@@ -436,7 +510,20 @@ def split_into_natural_chunks(text, max_chars=300):
             if sub:
                 final_chunks.append(sub.strip())
     
-    return final_chunks
+    # CRITICAL: Merge tiny chunks into previous chunk.
+    # Chunks under ~60 chars (e.g. "Gute Nacht.") sound robotic because
+    # the model has too little context for natural prosody.
+    MIN_CHUNK_CHARS = 60
+    merged = []
+    for chunk in final_chunks:
+        if merged and len(chunk) < MIN_CHUNK_CHARS:
+            # Merge with previous chunk
+            merged[-1] = merged[-1] + " " + chunk
+            print(f"[chunker] 🔗 Merged short chunk ({len(chunk)} chars) into previous")
+        else:
+            merged.append(chunk)
+    
+    return merged
 
 
 def get_pause_duration_after_chunk(chunk_text, sr):
@@ -485,10 +572,18 @@ def generate_tts_handler(job):
     #   - Lower temperature → more controlled, deliberate pacing
     #   - Slightly lower top_p → less randomness in token selection
     #   - Higher repetition_penalty → avoids rushed repetitive patterns
-    temperature = float(inp.get("temperature", 0.6)) 
+    temperature = float(inp.get("temperature", 0.7)) 
     top_p = float(inp.get("top_p", 0.9))             
-    repetition_penalty = float(inp.get("repetition_penalty", 1.1)) 
+    repetition_penalty = float(inp.get("repetition_penalty", 1.05)) 
     top_k = int(inp.get("top_k", 50))
+    
+    # Subtalker (acoustic code predictor) settings — CRITICAL for voice consistency!
+    # These control how the acoustic codes are sampled. Using tight, consistent
+    # settings prevents the "some chunks sound different" problem.
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.7))
+    subtalker_top_k = int(inp.get("subtalker_top_k", 50))
+    subtalker_top_p = float(inp.get("subtalker_top_p", 0.9))
+    subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
     
     if not text:
         return {"error": "No text provided"}
@@ -569,6 +664,9 @@ def generate_tts_handler(job):
         except Exception as e:
             print(f"[TTS] ⚠️  Voice clipping skipped: {e}")
 
+        # Normalize reference audio volume (quiet recordings → quiet output)
+        voice_path = normalize_reference_audio(voice_path)
+
         # Build a reusable voice clone prompt (voice DNA cache)
         voice_clone_prompt = None
         try:
@@ -623,6 +721,12 @@ def generate_tts_handler(job):
                 repetition_penalty=repetition_penalty,
                 top_k=top_k,
                 max_new_tokens=limit,
+                # Subtalker settings for consistent voice across ALL chunks
+                subtalker_dosample=True,
+                subtalker_temperature=subtalker_temperature,
+                subtalker_top_k=subtalker_top_k,
+                subtalker_top_p=subtalker_top_p,
+                subtalker_repetition_penalty=subtalker_repetition_penalty,
             )
             
             if voice_clone_prompt is not None:
@@ -671,6 +775,13 @@ def generate_tts_handler(job):
             
         # Combine pieces
         final_audio = np.concatenate(all_audio)
+        
+        # --- LOUDNESS NORMALIZATION ---
+        # Normalize the final audio to a consistent volume level (-14 dBFS)
+        # This fixes the "audio is too quiet" issue
+        print(f"[TTS] 🔊 Normalizing final audio loudness...")
+        final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-14.0)
+        
         duration = len(final_audio) / sr
         
         # 3. Encoding to MP3
