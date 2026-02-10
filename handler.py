@@ -1,5 +1,10 @@
-import runpod
+# ⚠️ CRITICAL: SET FLASH ATTENTION ENV VARS BEFORE ANY IMPORTS ⚠️
 import os
+os.environ["FLASH_ATTENTION_AVAILABLE"] = "1"
+os.environ["USE_FLASH_ATTENTION"] = "1"
+os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"
+
+import runpod
 import torch
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
@@ -60,14 +65,8 @@ def init_model():
         return
         
     try:
-        # ⚠️ CRITICAL: SET ENV VARS BEFORE ANY MODEL IMPORTS ⚠️
-        import os
-        os.environ["FLASH_ATTENTION_AVAILABLE"] = "1"  # Primary trigger
-        os.environ["USE_FLASH_ATTENTION"] = "1"         # Redundant safety net
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"  # Some forks check this
-        
-        # NOW import model AFTER env vars are set
-        from qwen_tts import Qwen3TTSModel  # Must come AFTER env vars!
+        # NOW import model after env vars are set
+        from qwen_tts import Qwen3TTSModel
         
         print(f"[startup] Loading Qwen3-TTS model: {MODEL_NAME_OR_PATH}...")
         
@@ -78,7 +77,7 @@ def init_model():
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
             device_map="cuda:0",
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2"
         )
 
@@ -139,16 +138,18 @@ def init_model():
         
         # Try to find the underlying transformer model inside the wrapper
         underlying_model = None
-        if hasattr(model, 'model'):
-            underlying_model = model.model
-            print(f"[FA2 CHECK] Found underlying model at: model.model")
-        elif hasattr(model, 'talker'):
+        if hasattr(model, 'talker'):
             underlying_model = model.talker
             print(f"[FA2 CHECK] Found underlying model at: model.talker")
+        elif hasattr(model, 'model'):
+            underlying_model = model.model
+            print(f"[FA2 CHECK] Found underlying model at: model.model")
         
         # Check config of underlying model
         if underlying_model and hasattr(underlying_model, 'config'):
-            actual_impl = getattr(underlying_model.config, '_attn_implementation_autoset', 'unknown')
+            # Some models use _attn_implementation_autoset, others just use _attn_implementation
+            actual_impl = getattr(underlying_model.config, '_attn_implementation_autoset', 
+                                 getattr(underlying_model.config, '_attn_implementation', 'unknown'))
             print(f"[FA2] Actual attention implementation: {actual_impl}")
             if actual_impl == 'flash_attention_2':
                 print(f"[FA2] ✅ Model IS using Flash Attention 2")
@@ -157,10 +158,15 @@ def init_model():
 
         # Verify Flash Attention is ACTIVE in the actual inference path
         search_model = underlying_model if underlying_model else model
+        
+        # Qwen3 often has layers nested inside 'model' or 'talker'
+        if not hasattr(search_model, 'layers') and hasattr(search_model, 'model'):
+            search_model = search_model.model
+            
         if hasattr(search_model, 'layers'):
             first_layer_attn = type(search_model.layers[0].self_attn).__name__
             print(f"[FA2] First attention layer type: {first_layer_attn}")
-            if "Flash" in first_layer_attn:
+            if "Flash" in first_layer_attn or "flash" in first_layer_attn.lower():
                 print("✅ FLASH ATTENTION CONFIRMED ACTIVE")
             else:
                 print("❌ WARNING: Standard attention layer detected!")
@@ -568,21 +574,19 @@ def generate_tts_handler(job):
     language = LANG_MAP.get(lang_code.lower(), "auto")
     
     # --- VOICE SETTINGS ---
-    # Tuned for natural, unhurried storytelling:
-    #   - Lower temperature → more controlled, deliberate pacing
-    #   - Slightly lower top_p → less randomness in token selection
-    #   - Higher repetition_penalty → avoids rushed repetitive patterns
-    temperature = float(inp.get("temperature", 0.7)) 
-    top_p = float(inp.get("top_p", 0.9))             
+    # Tuned for expressive, engaging storytelling:
+    #   - Temperature 0.75 → adds just enough "acting" and pitch variety
+    #   - Top_p 0.95 → allows for a richer range of natural inflections
+    #   - Repetition_penalty 1.05 → keeps it stable without being robotic
+    temperature = float(inp.get("temperature", 0.75)) 
+    top_p = float(inp.get("top_p", 0.95))             
     repetition_penalty = float(inp.get("repetition_penalty", 1.05)) 
     top_k = int(inp.get("top_k", 50))
     
-    # Subtalker (acoustic code predictor) settings — CRITICAL for voice consistency!
-    # These control how the acoustic codes are sampled. Using tight, consistent
-    # settings prevents the "some chunks sound different" problem.
-    subtalker_temperature = float(inp.get("subtalker_temperature", 0.7))
+    # Subtalker (acoustic code predictor) settings — tuned for energy!
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.75))
     subtalker_top_k = int(inp.get("subtalker_top_k", 50))
-    subtalker_top_p = float(inp.get("subtalker_top_p", 0.9))
+    subtalker_top_p = float(inp.get("subtalker_top_p", 0.95))
     subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
     
     if not text:
