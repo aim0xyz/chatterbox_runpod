@@ -346,6 +346,122 @@ def decrypt_voice(encrypted_base64, key_base64):
         return None
 
 # ==========================================
+# TEXT PREPROCESSING FOR NATURAL SPEECH
+# ==========================================
+def preprocess_text_for_natural_speech(text):
+    """Preprocess text to produce more natural-sounding, well-paced speech.
+    
+    This normalizes punctuation, ensures proper spacing, and adds subtle
+    textual cues that guide the TTS model toward natural pauses and pacing.
+    """
+    import re
+    
+    # 1. Normalize Unicode quotes and dashes to ASCII
+    text = text.replace('\u201c', '"').replace('\u201d', '"')  # smart double quotes
+    text = text.replace('\u2018', "'").replace('\u2019', "'")  # smart single quotes
+    text = text.replace('\u2014', ' - ')   # em-dash → spaced hyphen (natural pause)
+    text = text.replace('\u2013', ' - ')   # en-dash → spaced hyphen
+    text = text.replace('\u2026', '...')    # ellipsis character → three dots
+    
+    # 2. Ensure there is always a space after sentence-ending punctuation
+    #    so the model perceives clear sentence boundaries
+    text = re.sub(r'([.!?])([A-Z])', r'\1 \2', text)
+    
+    # 3. Normalize multiple spaces / newlines into clean boundaries
+    #    - Preserve paragraph breaks (double newline) as a marker
+    text = re.sub(r'\n\s*\n', '\n\n', text)   # normalize paragraph breaks
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)  # single newline → space
+    
+    # 4. Add a gentle pause cue ("...") after paragraph breaks.
+    #    The model interprets "..." as a natural hesitation/pause.
+    text = text.replace('\n\n', '... ')
+    
+    # 5. Collapse excessive whitespace
+    text = re.sub(r'  +', ' ', text)
+    
+    return text.strip()
+
+
+def split_into_natural_chunks(text, max_chars=300):
+    """Split text into chunks that respect natural speech boundaries.
+    
+    Priority order:
+      1. Paragraph breaks ("... " markers from preprocessing)
+      2. Sentence boundaries (after . ! ?)
+      3. Clause boundaries (after , ; :) — only if sentence is very long
+    
+    Each chunk ends at a natural pause point so inter-chunk silence
+    sounds like a real breath or thought break.
+    """
+    import re
+    
+    # First, split by paragraph-break markers
+    paragraphs = [p.strip() for p in text.split('... ') if p.strip()]
+    
+    chunks = []
+    for para in paragraphs:
+        # Split paragraph into sentences (keep the punctuation attached)
+        sentences = re.split(r'(?<=[.!?])\s+', para)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        current_chunk = ""
+        for sent in sentences:
+            # If adding this sentence would exceed the limit, flush
+            if current_chunk and (len(current_chunk) + 1 + len(sent)) > max_chars:
+                chunks.append(current_chunk.strip())
+                current_chunk = sent
+            else:
+                current_chunk = (current_chunk + " " + sent).strip() if current_chunk else sent
+        
+        if current_chunk:
+            # Mark the last chunk of each paragraph so we know to add
+            # a longer pause after it
+            chunks.append(current_chunk.strip())
+    
+    # Safety: break any remaining oversized chunks at clause boundaries
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk) <= max_chars:
+            final_chunks.append(chunk)
+        else:
+            # Split at clause boundaries (comma, semicolon, colon)
+            parts = re.split(r'(?<=[,;:])\s+', chunk)
+            sub = ""
+            for part in parts:
+                if sub and (len(sub) + 1 + len(part)) > max_chars:
+                    final_chunks.append(sub.strip())
+                    sub = part
+                else:
+                    sub = (sub + " " + part).strip() if sub else part
+            if sub:
+                final_chunks.append(sub.strip())
+    
+    return final_chunks
+
+
+def get_pause_duration_after_chunk(chunk_text, sr):
+    """Return silence samples to insert after a chunk, based on how it ends.
+    
+    Longer pauses after paragraph-like endings, medium after sentences,
+    shorter after clause boundaries (comma, semicolon).
+    """
+    text = chunk_text.rstrip()
+    
+    if text.endswith('...'):
+        # Paragraph transition / ellipsis — longest pause
+        return np.zeros(int(0.65 * sr))
+    elif text.endswith(('.', '!', '?')):
+        # Sentence end — comfortable breath pause
+        return np.zeros(int(0.45 * sr))
+    elif text.endswith((',', ';', ':', '-')):
+        # Clause boundary — short, natural pause
+        return np.zeros(int(0.25 * sr))
+    else:
+        # Default — moderate pause
+        return np.zeros(int(0.35 * sr))
+
+
+# ==========================================
 # HANDLERS
 # ==========================================
 def generate_tts_handler(job):
@@ -365,10 +481,14 @@ def generate_tts_handler(job):
     language = LANG_MAP.get(lang_code.lower(), "auto")
     
     # --- VOICE SETTINGS ---
-    temperature = float(inp.get("temperature", 0.75)) 
-    top_p = float(inp.get("top_p", 0.95))             
-    repetition_penalty = float(inp.get("repetition_penalty", 1.05)) 
-    top_k = int(inp.get("top_k", 75))
+    # Tuned for natural, unhurried storytelling:
+    #   - Lower temperature → more controlled, deliberate pacing
+    #   - Slightly lower top_p → less randomness in token selection
+    #   - Higher repetition_penalty → avoids rushed repetitive patterns
+    temperature = float(inp.get("temperature", 0.6)) 
+    top_p = float(inp.get("top_p", 0.9))             
+    repetition_penalty = float(inp.get("repetition_penalty", 1.1)) 
+    top_k = int(inp.get("top_k", 50))
     
     if not text:
         return {"error": "No text provided"}
@@ -401,22 +521,13 @@ def generate_tts_handler(job):
     if not voice_path:
         return {"error": f"Voice not found: {preset_voice or voice_id}"}
 
-    # --- THE STITCHER: SMART CHUNKING ---
-    def split_into_chunks(t, max_chars=300):
-        # Split by sentence markers but keep punctuation
-        sentences = re.split('(?<=[.!?]) +', t)
-        chunks = []
-        current_chunk = ""
-        for s in sentences:
-            if len(current_chunk) + len(s) < max_chars:
-                current_chunk += " " + s
-            else:
-                if current_chunk: chunks.append(current_chunk.strip())
-                current_chunk = s
-        if current_chunk: chunks.append(current_chunk.strip())
-        return chunks
-
-    text_chunks = split_into_chunks(text)
+    # --- NATURAL SPEECH PREPROCESSING ---
+    # Preprocess text for better prosody and natural pauses
+    text = preprocess_text_for_natural_speech(text)
+    print(f"[TTS] 📝 Preprocessed text ({len(text)} chars): '{text[:100]}...'")
+    
+    # --- THE STITCHER: SMART NATURAL CHUNKING ---
+    text_chunks = split_into_natural_chunks(text, max_chars=280)
     
     print(f"\n{'='*60}")
     print(f"[TTS] 🎙️  STARTING CHUNKED GENERATION")
@@ -439,7 +550,9 @@ def generate_tts_handler(job):
         if model is None:
              return {"error": "Model not loaded"}
 
-        # --- SPEED INJECTOR 1: Voice DNA Caching ---
+        # --- VOICE DNA CACHING (create_voice_clone_prompt) ---
+        # Pre-encode voice signature ONCE and reuse across all chunks.
+        # This ensures consistent voice across chunks AND is faster.
         print(f"[TTS] 🧬 Pre-encoding voice signature: {voice_path}")
         prep_start = time.time()
         
@@ -456,8 +569,25 @@ def generate_tts_handler(job):
         except Exception as e:
             print(f"[TTS] ⚠️  Voice clipping skipped: {e}")
 
+        # Build a reusable voice clone prompt (voice DNA cache)
+        voice_clone_prompt = None
+        try:
+            voice_clone_prompt = model.create_voice_clone_prompt(
+                ref_audio=str(voice_path),
+                ref_text=None,
+                x_vector_only_mode=True,
+            )
+            prep_time = time.time() - prep_start
+            print(f"[TTS] ✅ Voice DNA cached in {prep_time:.2f}s (reused for all {len(text_chunks)} chunks)")
+        except Exception as e:
+            print(f"[TTS] ⚠️  Voice prompt caching failed, falling back to per-chunk encoding: {e}")
+
         # Ensure we use high-speed no-grad mode
         torch.set_grad_enabled(False)
+
+        # Add a small leading silence for a natural start (150ms)
+        lead_silence = np.zeros(int(0.15 * sr))
+        all_audio.append(lead_silence)
 
         print(f"\n{'='*60}")
         print(f"[PROFILER] 🔍 DEEP PERFORMANCE ANALYSIS")
@@ -469,11 +599,11 @@ def generate_tts_handler(job):
             log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
             
             print(f"\n[PROFILER] --- Chunk {i+1}/{len(text_chunks)} ---")
-            print(f"[PROFILER] Text: '{chunk[:50]}...' ({len(chunk)} chars)")
+            print(f"[PROFILER] Text: '{chunk[:80]}...' ({len(chunk)} chars)")
             
             chunk_start = time.time()
-            # SPEED FIX 2: Hard limit on generation length
-            limit = int(len(chunk) * 2.2) + 60
+            # Token limit: slightly more generous to allow the model to breathe
+            limit = int(len(chunk) * 2.5) + 80
             print(f"[PROFILER] Token limit: {limit}")
             
             # Sync GPU before timing
@@ -484,19 +614,25 @@ def generate_tts_handler(job):
             print(f"[PROFILER] ⏱️  Starting generation at t={0:.2f}s...")
             
             # Generate this specific chunk
-            # Forced Zero-Shot Mode (No ICL) for maximum speed
-            wavs, sample_rate = model.generate_voice_clone(
+            # Use cached voice prompt if available, otherwise fall back
+            gen_kwargs = dict(
                 text=chunk,
                 language=language,
-                ref_audio=str(voice_path),
-                ref_text=None,
-                x_vector_only_mode=True, 
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
                 top_k=top_k,
-                max_new_tokens=limit
+                max_new_tokens=limit,
             )
+            
+            if voice_clone_prompt is not None:
+                gen_kwargs["voice_clone_prompt"] = voice_clone_prompt
+            else:
+                gen_kwargs["ref_audio"] = str(voice_path)
+                gen_kwargs["ref_text"] = None
+                gen_kwargs["x_vector_only_mode"] = True
+            
+            wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
             
             # Sync GPU after generation
             if torch.cuda.is_available():
@@ -525,9 +661,13 @@ def generate_tts_handler(job):
             sr = sample_rate
             all_audio.append(wavs[0])
             
-            # Add 400ms silence for natural rhythm
-            silence = np.zeros(int(0.4 * sr))
-            all_audio.append(silence)
+            # Add variable silence based on how the chunk ends
+            # (paragraph break > sentence end > clause boundary)
+            if i < len(text_chunks) - 1:  # No trailing silence after last chunk
+                pause = get_pause_duration_after_chunk(chunk, sr)
+                all_audio.append(pause)
+                pause_ms = int(len(pause) / sr * 1000)
+                print(f"[TTS] 🔇 Added {pause_ms}ms pause after chunk {i+1}")
             
         # Combine pieces
         final_audio = np.concatenate(all_audio)
