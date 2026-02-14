@@ -119,12 +119,28 @@ def init_model():
                 print("[startup] Warm-up complete!")
                 
                 # --- TURBO MODE: TORCH COMPILE ---
-                # This can double the tokens/s after the first request
-                print("[startup] 🚀 Turbo Mode: Compiling generation function for 100+ tokens/s...")
-                model.generate_voice_clone = torch.compile(model.generate_voice_clone, mode="reduce-overhead")
-                print("[startup] ✅ Compilation initialized.")
+                # Check for C++ compiler first to avoid BackendCompilerFailed on some RunPod images
+                import shutil
+                has_compiler = shutil.which("g++") or shutil.which("clang++") or os.environ.get("CC")
+                
+                if has_compiler:
+                    print("[startup] 🚀 Turbo Mode: Compiling generation function for 100+ tokens/s...")
+                    try:
+                        # mode="reduce-overhead" is great for TTS but requires a stable environment
+                        # We use fullgraph=False to allow for some dynamic shapes if needed
+                        model.generate_voice_clone = torch.compile(
+                            model.generate_voice_clone, 
+                            mode="reduce-overhead",
+                            fullgraph=False
+                        )
+                        print("[startup] ✅ Compilation initialized.")
+                    except Exception as compile_err:
+                        print(f"[startup] ⚠️ Turbo Mode failed to initialize: {compile_err}")
+                else:
+                    print("[startup] ⚠️ Turbo Mode DISABLED: No C++ compiler (g++) found.")
+                    print("[startup] Tip: Run 'apt-get install g++' for 2x faster performance.")
             except Exception as e:
-                print(f"[startup] Turbo Mode/Warm-up skipped (non-critical): {e}")
+                print(f"[startup] Warm-up/Compilation skipped: {e}")
         
         print("[startup] Model loaded successfully into GPU!")
     except Exception as e:

@@ -12,9 +12,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME="/runpod-volume/.cache/huggingface"
 ENV PYTHONPATH="/app"
 
-# Install system dependencies (ffmpeg for audio, git for qwen-tts)
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+    build-essential \
+    g++ \
     git \
     git-lfs \
     ffmpeg \
