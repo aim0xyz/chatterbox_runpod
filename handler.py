@@ -96,10 +96,10 @@ def init_model():
             print(f"[SDPA] VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB used")
         print(f"{'='*60}\n")
 
-        # --- THE WARM-UP ---
+        # --- WARM-UP & COMPILATION ---
         # This forces the 'code_predictor' and 'speaker_encoder' to initialize NOW
         print("[startup] Warming up model engine...")
-        dummy_ref = str(PRESET_ROOT / "en/Owen.wav") # Owen is reliably 24khz
+        dummy_ref = str(PRESET_ROOT / "/runpod-volume/preset_voices/en/Owen.wav") # Owen is reliably 24khz
         if not os.path.exists(dummy_ref):
             # Fallback to any file in presets
             for f in PRESET_ROOT.rglob("*.wav"):
@@ -116,9 +116,15 @@ def init_model():
                         x_vector_only_mode=True, # MUST match generation logic
                         max_new_tokens=5
                     )
-                print("[startup] Warm-up complete! Engine is hot.")
+                print("[startup] Warm-up complete!")
+                
+                # --- TURBO MODE: TORCH COMPILE ---
+                # This can double the tokens/s after the first request
+                print("[startup] 🚀 Turbo Mode: Compiling generation function for 100+ tokens/s...")
+                model.generate_voice_clone = torch.compile(model.generate_voice_clone, mode="reduce-overhead")
+                print("[startup] ✅ Compilation initialized.")
             except Exception as e:
-                print(f"[startup] Warm-up skipped/failed (non-critical): {e}")
+                print(f"[startup] Turbo Mode/Warm-up skipped (non-critical): {e}")
         
         print("[startup] Model loaded successfully into GPU!")
     except Exception as e:
@@ -281,8 +287,8 @@ def normalize_audio_loudness(audio, sr, target_dbfs=-14.0):
     # Calculate required gain
     gain = target_rms / rms
     
-    # Cap gain to avoid amplifying noise excessively
-    max_gain = 8.0
+    # Cap gain to avoid amplifying noise excessively (Increased to 15x for super quiet recordings)
+    max_gain = 15.0
     if gain > max_gain:
         print(f"[normalize] ⚠️  Gain capped at {max_gain}x (original would be {gain:.1f}x)")
         gain = max_gain
@@ -313,10 +319,10 @@ def normalize_reference_audio(voice_path, sr=24000):
         audio_np = waveform.squeeze().numpy()
         
         rms = float(np.sqrt(np.mean(audio_np ** 2)))
-        if rms < 0.01:  # Very quiet recording
+        if rms < 0.15:  # Higher threshold to ensure robust reference
             print(f"[ref_norm] 🔇 Reference audio is quiet (RMS={rms:.4f}), normalizing...")
-            target_rms = 0.15  # Moderate level for reference
-            gain = min(target_rms / max(rms, 1e-8), 6.0)
+            target_rms = 0.20  # Stronger level for reference to encourage loud output
+            gain = min(target_rms / max(rms, 1e-8), 12.0) # More headroom for quiet clips
             audio_np = np.clip(audio_np * gain, -0.999, 0.999).astype(np.float32)
             
             # Save normalized reference
@@ -444,6 +450,16 @@ def generate_tts_handler(job):
     
     # Translate language code to full name (e.g. 'de' -> 'german')
     language = LANG_MAP.get(lang_code.lower(), "auto")
+    
+    # --- PROMPT LEAK PROTECTION ---
+    if text and len(text) > 100 and (("The user wants" in text and "child" in text) or ("Story Details:" in text)):
+        print(f"\n{'!'*60}")
+        print(f"[TTS] ⚠️  PROMPT LEAK DETECTED!")
+        print(f"[TTS] The input text looks like an internal LLM prompt, not a story.")
+        print(f"[TTS] Leak preview: {text[:120]}...")
+        print(f"{'!'*60}\n")
+    
+    print(f"[TTS] Initializing generation for: {text[:50]}...")
     
     # --- VOICE SETTINGS ---
     # Tuned for expressive, engaging storytelling:
@@ -612,7 +628,9 @@ def generate_tts_handler(job):
                 gen_kwargs["ref_text"] = None
                 gen_kwargs["x_vector_only_mode"] = True
             
-            wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
+            # Generate this specific chunk with Turbo Speed
+            with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
             
             # Sync GPU after generation
             if torch.cuda.is_available():
