@@ -1,8 +1,4 @@
-# ⚠️ CRITICAL: SET FLASH ATTENTION ENV VARS BEFORE ANY IMPORTS ⚠️
 import os
-os.environ["FLASH_ATTENTION_AVAILABLE"] = "1"
-os.environ["USE_FLASH_ATTENTION"] = "1"
-os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"
 
 import runpod
 import torch
@@ -28,7 +24,7 @@ VOICE_ROOT = Path("/runpod-volume/user_voices")
 PRESET_ROOT = Path("/runpod-volume/preset_voices")
 
 # --- SMART PATH DISCOVERY ---
-# Use existing 1.7B Base model (Flash variant doesn't exist)
+# Use existing 1.7B Base model
 MODEL_NAME_OR_PATH = "/runpod-volume/qwen3_models"  # Your existing 1.7B
 
 if not (Path(MODEL_NAME_OR_PATH) / "model.safetensors").exists():
@@ -36,10 +32,6 @@ if not (Path(MODEL_NAME_OR_PATH) / "model.safetensors").exists():
     print(f"[startup] Model not found locally, will download: {MODEL_NAME_OR_PATH}")
 else:
     print(f"[startup] Using existing 1.7B Base model: {MODEL_NAME_OR_PATH}")
-
-# --- OPTIMIZATION SETTINGS ---
-# Since FA2 isn't supported in the Talker module, we'll use torch.compile() instead
-USE_TORCH_COMPILE = False  # Set to False to skip compilation (faster startup, slower generation)
 
 # Global model variable
 model = None
@@ -65,7 +57,6 @@ def init_model():
         return
         
     try:
-        # NOW import model after env vars are set
         from qwen_tts import Qwen3TTSModel
         
         print(f"[startup] Loading Qwen3-TTS model: {MODEL_NAME_OR_PATH}...")
@@ -74,11 +65,13 @@ def init_model():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         
+        # Use PyTorch native SDPA (Scaled Dot Product Attention)
+        # No flash-attn compilation needed — works on T4, A10G, L4, etc.
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
             device_map="cuda:0",
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2"
+            attn_implementation="sdpa"
         )
 
         # Reduce VRAM pressure for serverless concurrency
@@ -92,118 +85,15 @@ def init_model():
             model.tokenizer.padding_side = 'left'
             model.tokenizer.pad_token = model.tokenizer.eos_token
 
-        # --- FLASH ATTENTION VERIFICATION ---
+        # --- ATTENTION VERIFICATION ---
         print(f"\n{'='*60}")
-        print(f"[FA2 CHECK] 🔍 Verifying Flash Attention Status")
+        print(f"[SDPA] 🔍 Verifying Attention Backend")
         print(f"{'='*60}")
-        
-        # Check 1: Is flash_attn installed?
-        try:
-            import flash_attn
-            print(f"[FA2 CHECK] ✅ flash_attn module installed (v{flash_attn.__version__})")
-        except ImportError:
-            print(f"[FA2 CHECK] ❌ flash_attn module NOT installed")
-        
-        # Check 2: Inspect Qwen3TTSModel wrapper
-        print(f"[FA2 CHECK] Model type: {type(model).__name__}")
-        
-        # Check 2.5: Verify GPU usage
-        print(f"\n[FA2 CHECK] 🖥️  Device Check:")
-        print(f"[FA2 CHECK] CUDA available: {torch.cuda.is_available()}")
+        print(f"[SDPA] ✅ Using PyTorch native SDPA (no flash-attn needed)")
+        print(f"[SDPA] Model type: {type(model).__name__}")
         if torch.cuda.is_available():
-            print(f"[FA2 CHECK] CUDA device: {torch.cuda.get_device_name(0)}")
-            print(f"[FA2 CHECK] Current device: cuda:{torch.cuda.current_device()}")
-        
-        # Check where model parameters are actually located
-        cpu_params = 0
-        gpu_params = 0
-        try:
-            for name, param in model.named_parameters():
-                if param.device.type == 'cpu':
-                    cpu_params += 1
-                    if cpu_params == 1:  # Only print first one
-                        print(f"[FA2 CHECK] ⚠️  Found CPU parameter: {name}")
-                elif param.device.type == 'cuda':
-                    gpu_params += 1
-                    if gpu_params == 1:  # Only print first one
-                        print(f"[FA2 CHECK] ✅ Found GPU parameter: {name} (device={param.device})")
-        except:
-            print(f"[FA2 CHECK] ⚠️  Could not iterate parameters")
-        
-        if cpu_params > 0:
-            print(f"[FA2 CHECK] ❌ CRITICAL: {cpu_params} parameters on CPU!")
-            print(f"[FA2 CHECK] 🐌 This WILL cause 10-20x slowdown!")
-        elif gpu_params > 0:
-            print(f"[FA2 CHECK] ✅ All {gpu_params} parameters on GPU")
-        
-        # Try to find the underlying transformer model inside the wrapper
-        underlying_model = None
-        if hasattr(model, 'talker'):
-            underlying_model = model.talker
-            print(f"[FA2 CHECK] Found underlying model at: model.talker")
-        elif hasattr(model, 'model'):
-            underlying_model = model.model
-            print(f"[FA2 CHECK] Found underlying model at: model.model")
-        
-        # Check config of underlying model
-        if underlying_model and hasattr(underlying_model, 'config'):
-            # Some models use _attn_implementation_autoset, others just use _attn_implementation
-            actual_impl = getattr(underlying_model.config, '_attn_implementation_autoset', 
-                                 getattr(underlying_model.config, '_attn_implementation', 'unknown'))
-            print(f"[FA2] Actual attention implementation: {actual_impl}")
-            if actual_impl == 'flash_attention_2':
-                print(f"[FA2] ✅ Model IS using Flash Attention 2")
-            else:
-                print(f"[FA2] ⚠️  WARNING: Model NOT using Flash Attention! (Using: {actual_impl})")
-
-        # Verify Flash Attention is ACTIVE in the actual inference path
-        search_model = underlying_model if underlying_model else model
-        
-        # Qwen3 often has layers nested inside 'model' or 'talker'
-        if not hasattr(search_model, 'layers') and hasattr(search_model, 'model'):
-            search_model = search_model.model
-            
-        if hasattr(search_model, 'layers'):
-            first_layer_attn = type(search_model.layers[0].self_attn).__name__
-            print(f"[FA2] First attention layer type: {first_layer_attn}")
-            if "Flash" in first_layer_attn or "flash" in first_layer_attn.lower():
-                print("✅ FLASH ATTENTION CONFIRMED ACTIVE")
-            else:
-                print("❌ WARNING: Standard attention layer detected!")
-        
-        # Check 3: Look for Flash Attention in the model's submodules
-        fa2_found = False
-        standard_attn_found = False
-        
-        try:
-            # Try to iterate through modules (works for standard PyTorch models)
-            search_model = underlying_model if underlying_model else model
-            
-            if hasattr(search_model, 'named_modules'):
-                for name, module in search_model.named_modules():
-                    module_type = type(module).__name__
-                    
-                    if 'Flash' in module_type or 'flash' in module_type.lower():
-                        fa2_found = True
-                        print(f"[FA2 CHECK] ✅ Found FA2 layer: {name} ({module_type})")
-                        break
-                    
-                    if 'Attention' in module_type and 'Flash' not in module_type and not standard_attn_found:
-                        standard_attn_found = True
-                        print(f"[FA2 CHECK] ⚠️  Found standard attention: {name} ({module_type})")
-        except Exception as e:
-            print(f"[FA2 CHECK] ⚠️  Could not inspect model layers: {e}")
-        
-        # Summary
-        print(f"\n[FA2] 📊 VERDICT:")
-        if fa2_found:
-            print(f"[FA2] ✅ Flash Attention 2 IS ACTIVE")
-            print(f"[FA2] 🚀 Expected: 100+ tokens/sec on L4/A5000")
-        else:
-            print(f"[FA2] ❌ Flash Attention 2 NOT DETECTED")
-            print(f"[FA2] 🐌 This explains 13-23 tokens/sec performance")
-            print(f"[FA2] 💡 qwen-tts may not support FA2 acceleration")
-        
+            print(f"[SDPA] GPU: {torch.cuda.get_device_name(0)}")
+            print(f"[SDPA] VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB used")
         print(f"{'='*60}\n")
 
         # --- THE WARM-UP ---
@@ -229,24 +119,6 @@ def init_model():
                 print("[startup] Warm-up complete! Engine is hot.")
             except Exception as e:
                 print(f"[startup] Warm-up skipped/failed (non-critical): {e}")
-        
-        # --- TORCH COMPILE OPTIMIZATION ---
-        # Since FA2 isn't active in Talker, use torch.compile() for 2-3x speedup
-        if USE_TORCH_COMPILE:
-            print("\n[startup] 🔥 Compiling model with torch.compile() for speedup...")
-            print("[startup] ⏱️  This will take 1-2 minutes but makes generation 2-3x faster")
-            print("[startup] 💡 First generation will be slow (tracing), then very fast")
-            try:
-                # Compile for maximum speed
-                model.generate_voice_clone = torch.compile(
-                    model.generate_voice_clone,
-                    mode="reduce-overhead",
-                    fullgraph=False  # More flexible with complex graphs
-                )
-                print("[startup] ✅ Model compiled successfully!")
-            except Exception as e:
-                print(f"[startup] ⚠️  Compilation failed: {e}")
-                print(f"[startup] Continuing with uncompiled model")
         
         print("[startup] Model loaded successfully into GPU!")
     except Exception as e:
