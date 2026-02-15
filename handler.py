@@ -152,21 +152,25 @@ def init_model():
                     print("[startup] 🚀 Turbo Mode: Compiling generation function for speed...")
                     try:
                         # Silence Dynamo warnings
-                        # 1. PREVENT RE-INITIALIZATION (The Speed Thief)
-                        # The logs showed the model was re-initializing on every chunk. 
-                        # We lock the configs now to prevent this.
+                        # 1. DEEP MODEL SURGERY: Prevent self-sabotage/re-init
+                        # We must prevent the model from resetting its own 'code_predictor'
                         base = model.model
+                        
+                        # Fetch the actual config classes if possible
+                        from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSTalkerConfig, Qwen3TTSTalkerCodePredictorConfig
+                        
                         if hasattr(base, "talker"):
-                            # Force config to be 'not None' to stop the re-init loop
-                            if hasattr(base.talker, "config") and base.talker.config.code_predictor_config is None:
-                                base.talker.config.code_predictor_config = {} 
-
-                        # 2. DEEP PATCH: Fix 'is_compiling' and overhead
+                            t_cfg = base.talker.config
+                            # If the sub-configs are missing, the model re-inits (Speed Thief!)
+                            if t_cfg.code_predictor_config is None:
+                                print("[startup] 🔧 Patching Talker Config...")
+                                t_cfg.code_predictor_config = Qwen3TTSTalkerCodePredictorConfig()
+                                
+                        # 2. OPTIMIZATION SETTINGS
                         torch._dynamo.config.guard_nn_modules = True
                         torch._dynamo.config.suppress_errors = True
                         
-                        # 3. WHOLE-BACKBONE OPTIMIZATION
-                        # We compile the most critical math paths.
+                        # 3. WHOLE-BACKBONE PERSISTENT OPTIMIZATION
                         if hasattr(base, "talker") and hasattr(base.talker, "model"):
                             print("[startup] 🚀 Turbo Mode: Optimizing Talker Backbone...")
                             base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
@@ -176,12 +180,12 @@ def init_model():
                             base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
 
                         # 4. FORCE COMPILATION (BAKING)
-                        print("[startup] ⏳ Baking optimized kernels (Whole-Backbone persistence)...")
+                        print("[startup] ⏳ Baking optimized kernels (Locked Backbone)...")
                         
                         try:
                             with torch.inference_mode():
                                 model.generate_voice_clone(
-                                    text="Final turbo mode warm-up for maximum engine persistence.", 
+                                    text="Final deep surgery warm-up for maximum engine persistence.", 
                                     language="english", 
                                     ref_audio=dummy_ref,
                                     x_vector_only_mode=True, 
