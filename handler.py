@@ -165,58 +165,42 @@ def init_model():
                         # 1. OPTIMIZATION SETTINGS
                         torch._dynamo.config.guard_nn_modules = True
                         torch._dynamo.config.suppress_errors = True
-                        # Explicitly disable CUDA Graphs to prevent memory collisions in auto-regressive models
                         import torch._inductor.config as inductor_cfg
                         inductor_cfg.triton.cudagraphs = False
                         
                         base = model.model
                         
-                        # 2. LAYER-WISE TURBO: High-Latency (Non-CUDAGraph) Path
-                        # We use mode="default" but with Triton kernels enabled.
-                        # This avoids the "CUDAGraph overwritten" crash while staying 10x faster than Python.
-                        compile_kwargs = {
-                            "mode": "default", 
-                            "dynamic": True
-                        }
+                        # 2. TARGETED TURBO: Compile the core "Math Engines" 
+                        # We compile the backbone models as single units. 
+                        # This is much faster than 33 individual layer compiles and avoids the restart loop.
+                        if hasattr(base, "talker") and hasattr(base.talker, "model"):
+                            print("[startup] 🚀 Turbo Mode: Optimizing Talker Backbone...")
+                            base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
                         
-                        if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
-                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.model.layers)} Talker Layers (Stable Triton)...")
-                            for i, layer in enumerate(base.talker.model.layers):
-                                base.talker.model.layers[i] = torch.compile(layer, **compile_kwargs)
-                        
-                        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
-                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.code_predictor.model.layers)} Predictor Layers (Stable Triton)...")
-                            for i, layer in enumerate(base.talker.code_predictor.model.layers):
-                                base.talker.code_predictor.model.layers[i] = torch.compile(layer, **compile_kwargs)
+                        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model"):
+                            print("[startup] 🚀 Turbo Mode: Optimizing Code Predictor...")
+                            base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
 
-                        # 3. NITRO-PRIME (Warm-up)
-                        print("[startup] ⏳ Baking optimized kernels (Nitro-Prime)...")
-                        
+                        # 3. FLASH-BAKE (Fast Warm-up)
+                        # We do one quick request just to bind the kernels. 
+                        # We use minimal tokens to stay under the RunPod health-check timeout.
+                        print("[startup] ⏳ Flash-Baking optimized kernels...")
                         try:
                             with torch.inference_mode():
-                                # Prime English
                                 model.generate_voice_clone(
-                                    text="Turbo mode persistent engine warm-up.", 
+                                    text="Turbo engine active.", 
                                     language="english", 
                                     ref_audio=dummy_ref,
                                     x_vector_only_mode=True, 
-                                    max_new_tokens=128
-                                )
-                                # Prime German
-                                model.generate_voice_clone(
-                                    text="Turbo-Modus ist jetzt aktiv.", 
-                                    language="german", 
-                                    ref_audio=dummy_ref,
-                                    x_vector_only_mode=True, 
-                                    max_new_tokens=128
+                                    max_new_tokens=16
                                 )
                         except Exception as bake_notice:
                             if "is_compiling" not in str(bake_notice):
                                 print(f"[startup] ⚠️ Baking notice: {bake_notice}")
                         
-                        print("[startup] ✅ Compilation & Warm-up complete!")
-                    except Exception as compile_err:
-                        print(f"[startup] ⚠️ Turbo Mode failed to initialize: {compile_err}")
+                        print("[startup] ✅ Turbo Engine Ready!")
+                    except Exception as e:
+                        print(f"[startup] ⚠️ Turbo Mode failed to initialize: {e}")
                 else:
                     print("[startup] ⚠️ Turbo Mode DISABLED: No C++ compiler (g++) found.")
             except Exception as e:
