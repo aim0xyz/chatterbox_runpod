@@ -131,7 +131,7 @@ def init_model():
                         language="english", 
                         ref_audio=dummy_ref,
                         x_vector_only_mode=True, 
-                        max_new_tokens=1
+                        max_new_tokens=24 # Increased from 1 to avoid empty TensorList
                     )
                 print("[startup] Base logic OK.")
                 
@@ -164,7 +164,7 @@ def init_model():
                         with torch.inference_mode():
                             model.generate_voice_clone(
                                 text="Hi.", language="english", ref_audio=dummy_ref,
-                                x_vector_only_mode=True, max_new_tokens=5
+                                x_vector_only_mode=True, max_new_tokens=24 # Increased from 5
                             )
                         print("[startup] ✅ Compilation & Warm-up complete!")
                     except Exception as compile_err:
