@@ -85,9 +85,20 @@ def init_model():
             import logging
             logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
             logging.getLogger("torch._inductor").setLevel(logging.ERROR)
+            # Silence the 'code_predictor_config is None' spam at the logger level
+            logging.getLogger("qwen_tts.core.models.configuration_qwen3_tts").setLevel(logging.ERROR)
         except:
             pass
         
+        # --- DEEP MONKEYPATCH: Prevent Config Reset ---
+        from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSTalkerConfig, Qwen3TTSTalkerCodePredictorConfig
+        _old_talker_init = Qwen3TTSTalkerConfig.__init__
+        def _patched_talker_init(self, *args, **kwargs):
+            if "code_predictor_config" not in kwargs or kwargs["code_predictor_config"] is None:
+                kwargs["code_predictor_config"] = Qwen3TTSTalkerCodePredictorConfig().to_dict()
+            return _old_talker_init(self, *args, **kwargs)
+        Qwen3TTSTalkerConfig.__init__ = _patched_talker_init
+
         # Use PyTorch native SDPA (Scaled Dot Product Attention)
         # No flash-attn compilation needed — works on T4, A10G, L4, etc.
         model = Qwen3TTSModel.from_pretrained(
@@ -151,26 +162,14 @@ def init_model():
                 if has_compiler:
                     print("[startup] 🚀 Turbo Mode: Compiling generation function for speed...")
                     try:
-                        # Silence Dynamo warnings
-                        # 1. DEEP MODEL SURGERY: Prevent self-sabotage/re-init
-                        # We must prevent the model from resetting its own 'code_predictor'
-                        base = model.model
-                        
-                        # Fetch the actual config classes if possible
-                        from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSTalkerConfig, Qwen3TTSTalkerCodePredictorConfig
-                        
-                        if hasattr(base, "talker"):
-                            t_cfg = base.talker.config
-                            # If the sub-configs are missing, the model re-inits (Speed Thief!)
-                            if t_cfg.code_predictor_config is None:
-                                print("[startup] 🔧 Patching Talker Config...")
-                                t_cfg.code_predictor_config = Qwen3TTSTalkerCodePredictorConfig()
-                                
-                        # 2. OPTIMIZATION SETTINGS
+                        # 1. OPTIMIZATION SETTINGS
                         torch._dynamo.config.guard_nn_modules = True
                         torch._dynamo.config.suppress_errors = True
+                        torch._dynamo.config.reorderable_ops = True # Enable for masking speed
                         
-                        # 3. WHOLE-BACKBONE PERSISTENT OPTIMIZATION
+                        base = model.model
+                        
+                        # 2. WHOLE-BACKBONE PERSISTENT OPTIMIZATION
                         if hasattr(base, "talker") and hasattr(base.talker, "model"):
                             print("[startup] 🚀 Turbo Mode: Optimizing Talker Backbone...")
                             base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
@@ -179,13 +178,13 @@ def init_model():
                             print("[startup] 🚀 Turbo Mode: Optimizing Code Predictor...")
                             base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
 
-                        # 4. FORCE COMPILATION (BAKING)
-                        print("[startup] ⏳ Baking optimized kernels (Locked Backbone)...")
+                        # 3. FORCE COMPILATION (BAKING)
+                        print("[startup] ⏳ Baking optimized kernels (Persistent Engine)...")
                         
                         try:
                             with torch.inference_mode():
                                 model.generate_voice_clone(
-                                    text="Final deep surgery warm-up for maximum engine persistence.", 
+                                    text="Turbo mode persistent engine warm-up.", 
                                     language="english", 
                                     ref_audio=dummy_ref,
                                     x_vector_only_mode=True, 
