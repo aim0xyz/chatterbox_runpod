@@ -152,15 +152,21 @@ def init_model():
                     print("[startup] 🚀 Turbo Mode: Compiling generation function for speed...")
                     try:
                         # Silence Dynamo warnings
-                        # 1. DEEP PATCH: Fix the 'is_compiling' collision
-                        # This stays here to ensure 'transformers' doesn't crash the backbone compilation
+                        # 1. PREVENT RE-INITIALIZATION (The Speed Thief)
+                        # The logs showed the model was re-initializing on every chunk. 
+                        # We lock the configs now to prevent this.
+                        base = model.model
+                        if hasattr(base, "talker"):
+                            # Force config to be 'not None' to stop the re-init loop
+                            if hasattr(base.talker, "config") and base.talker.config.code_predictor_config is None:
+                                base.talker.config.code_predictor_config = {} 
+
+                        # 2. DEEP PATCH: Fix 'is_compiling' and overhead
                         torch._dynamo.config.guard_nn_modules = True
                         torch._dynamo.config.suppress_errors = True
                         
-                        base = model.model
-                        
-                        # 2. WHOLE-BACKBONE OPTIMIZATION
-                        # Now that the patch is working, we compile the entire backbones for max speed.
+                        # 3. WHOLE-BACKBONE OPTIMIZATION
+                        # We compile the most critical math paths.
                         if hasattr(base, "talker") and hasattr(base.talker, "model"):
                             print("[startup] 🚀 Turbo Mode: Optimizing Talker Backbone...")
                             base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
@@ -169,14 +175,13 @@ def init_model():
                             print("[startup] 🚀 Turbo Mode: Optimizing Code Predictor...")
                             base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
 
-                        # 3. FORCE COMPILATION (BAKING)
-                        # This pulls the optimized engine into the GPU cache
-                        print("[startup] ⏳ Baking optimized kernels (Whole-Backbone)...")
+                        # 4. FORCE COMPILATION (BAKING)
+                        print("[startup] ⏳ Baking optimized kernels (Whole-Backbone persistence)...")
                         
                         try:
                             with torch.inference_mode():
                                 model.generate_voice_clone(
-                                    text="Turbo mode warm-up for maximum engine performance.", 
+                                    text="Final turbo mode warm-up for maximum engine persistence.", 
                                     language="english", 
                                     ref_audio=dummy_ref,
                                     x_vector_only_mode=True, 
