@@ -165,7 +165,6 @@ def init_model():
                         # 1. OPTIMIZATION SETTINGS
                         torch._dynamo.config.guard_nn_modules = True
                         torch._dynamo.config.suppress_errors = True
-                        torch._dynamo.config.reorderable_ops = True # Enable for masking speed
                         
                         base = model.model
                         
