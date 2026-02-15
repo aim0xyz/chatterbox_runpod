@@ -149,22 +149,21 @@ def init_model():
                             torch._logging.set_logs(dynamo=torch._logging.log_levels.ERROR)
                         except: pass
 
-                        # CHANGE: Use mode="default". 
-                        # "reduce-overhead" takes 15+ mins to compile because of CUDA Graphs.
-                        # "default" is much faster (1-2 mins) and still provides a good boost.
-                        model.generate_voice_clone = torch.compile(
-                            model.generate_voice_clone, 
+                        # SAFETY CHANGE: Compile ONLY the core model, not the whole wrapper method.
+                        # Compiling the wrapper was causing 'FakeTensor' crashes because it tried
+                        # to optimize the tokenizer and file loading code (which isn't math).
+                        model.model = torch.compile(
+                            model.model, 
                             mode="default",
                             fullgraph=False
                         )
                         
                         # FORCE COMPILATION NOW (while starting up)
-                        # We do a tiny generation to 'bake' the first kernels
-                        print("[startup] ⏳ Baking optimized kernels (this prevents the first request from timing out)...")
+                        print("[startup] ⏳ Baking optimized kernels (this takes 1-2 mins)...")
                         with torch.inference_mode():
                             model.generate_voice_clone(
                                 text="Hi.", language="english", ref_audio=dummy_ref,
-                                x_vector_only_mode=True, max_new_tokens=24 # Increased from 5
+                                x_vector_only_mode=True, max_new_tokens=24
                             )
                         print("[startup] ✅ Compilation & Warm-up complete!")
                     except Exception as compile_err:
