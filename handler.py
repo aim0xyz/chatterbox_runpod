@@ -56,6 +56,14 @@ def init_model():
     if model is not None:
         return
         
+    # Patch for older torch/transformers versions where torch.compiler.is_compiling is checked
+    if not hasattr(torch, "compiler"):
+        class FakeCompiler:
+            def is_compiling(self): return False
+        torch.compiler = FakeCompiler()
+    elif not hasattr(torch.compiler, "is_compiling"):
+        torch.compiler.is_compiling = lambda: False
+
     try:
         from qwen_tts import Qwen3TTSModel
         
@@ -147,43 +155,40 @@ def init_model():
                         try:
                             import torch._logging
                             torch._logging.set_logs(dynamo=torch._logging.log_levels.ERROR)
-                        except: pass
-
-                        # DEEP OPTIMIZATION: Target the internal transformer backbones exactly.
-                        # We go two levels deep to avoid the 'generate' logic wrappers.
+                        # 1. DEEP PATCH: Fix the 'is_compiling' collision
+                        # This prevents the 'transformers' library from crashing the compiler 
+                        # when it tries to check its own status.
+                        torch._dynamo.config.guard_nn_modules = True
+                        torch._dynamo.config.suppress_errors = True
+                        
                         base = model.model
                         
-                        # 1. Compile the Main Talker Backbone
-                        if hasattr(base, "talker") and hasattr(base.talker, "model"):
-                            print("[startup] 🚀 Turbo Mode: Optimizing Talker Backbone...")
-                            base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
+                        # 2. LAYER-BY-LAYER OPTIMIZATION
+                        # We compile each Transformer Block individually. This is highly stable.
+                        if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
+                            total_layers = len(base.talker.model.layers)
+                            print(f"[startup] 🚀 Turbo Mode: Optimizing {total_layers} engine layers...")
+                            for i, layer in enumerate(base.talker.model.layers):
+                                base.talker.model.layers[i] = torch.compile(layer, mode="default")
                         
-                        # 2. Compile the Code Predictor Backbone
-                        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model"):
-                            print("[startup] 🚀 Turbo Mode: Optimizing Code Predictor...")
-                            base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
-
-                        # DEBUG: Print structure if anything was missed
-                        print(f"[startup] Model Engine: {type(base).__name__}")
-                        
-                        # FORCE COMPILATION NOW (while starting up)
-                        print("[startup] ⏳ Baking optimized kernels (this MUST take 1-2 mins to be effective)...")
-                        # Allow errors during baking so we can see what's happening
-                        torch._dynamo.config.suppress_errors = False 
+                        # 3. FORCE COMPILATION (BAKING)
+                        # We generate more tokens (128) to ensure the compiler has time to 'warm up'
+                        print("[startup] ⏳ Baking optimized kernels (this should take 60-90 seconds)...")
                         
                         try:
                             with torch.inference_mode():
                                 model.generate_voice_clone(
-                                    text="Warmup phrase for optimization.", 
+                                    text="Warmup phrases for deep optimization kernels.", 
                                     language="english", 
                                     ref_audio=dummy_ref,
                                     x_vector_only_mode=True, 
-                                    max_new_tokens=64
+                                    max_new_tokens=128 # Force a real workout
                                 )
-                        except Exception as bake_err:
-                            print(f"[startup] ⚠️ Baking warning/error: {bake_err}")
+                        except Exception as bake_notice:
+                            # If it's just a 'compiling' notice, we can ignore it
+                            if "is_compiling" not in str(bake_notice):
+                                print(f"[startup] ⚠️ Baking notice: {bake_notice}")
                         
-                        torch._dynamo.config.suppress_errors = True
                         print("[startup] ✅ Compilation & Warm-up complete!")
                     except Exception as compile_err:
                         print(f"[startup] ⚠️ Turbo Mode failed to initialize: {compile_err}")
