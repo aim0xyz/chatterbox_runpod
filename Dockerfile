@@ -3,7 +3,8 @@
 # Uses PyTorch native SDPA (no flash-attn compilation!)
 # Build time: ~2 minutes (download only, no C++ compile)
 # =====================================================
-FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+# Using PyTorch 2.4.0 for significantly better torch.compile stability and speed
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 

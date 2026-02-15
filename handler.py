@@ -168,26 +168,38 @@ def init_model():
                         
                         base = model.model
                         
-                        # 2. WHOLE-BACKBONE PERSISTENT OPTIMIZATION
-                        if hasattr(base, "talker") and hasattr(base.talker, "model"):
-                            print("[startup] 🚀 Turbo Mode: Optimizing Talker Backbone...")
-                            base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
+                        # 2. LAYER-WISE TURBO: Target the heavy math, keep the loop flexible
+                        # This avoids the "Trace-Thrashing" that caused the 3 tokens/s slowdown.
+                        if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
+                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.model.layers)} Talker Layers...")
+                            for i, layer in enumerate(base.talker.model.layers):
+                                base.talker.model.layers[i] = torch.compile(layer, mode="reduce-overhead")
                         
-                        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model"):
-                            print("[startup] 🚀 Turbo Mode: Optimizing Code Predictor...")
-                            base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
+                        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
+                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.code_predictor.model.layers)} Predictor Layers...")
+                            for i, layer in enumerate(base.talker.code_predictor.model.layers):
+                                base.talker.code_predictor.model.layers[i] = torch.compile(layer, mode="reduce-overhead")
 
-                        # 3. FORCE COMPILATION (BAKING)
-                        print("[startup] ⏳ Baking optimized kernels (Persistent Engine)...")
+                        # 3. MULTILINGUAL BAKING (Bilingual Prime)
+                        print("[startup] ⏳ Baking optimized kernels (Multilingual Prime)...")
                         
                         try:
                             with torch.inference_mode():
+                                # Prime English
                                 model.generate_voice_clone(
                                     text="Turbo mode persistent engine warm-up.", 
                                     language="english", 
                                     ref_audio=dummy_ref,
                                     x_vector_only_mode=True, 
-                                    max_new_tokens=128
+                                    max_new_tokens=64
+                                )
+                                # Prime German (Handles German-specific token shapes)
+                                model.generate_voice_clone(
+                                    text="Turbo-Modus ist jetzt aktiv.", 
+                                    language="german", 
+                                    ref_audio=dummy_ref,
+                                    x_vector_only_mode=True, 
+                                    max_new_tokens=64
                                 )
                         except Exception as bake_notice:
                             if "is_compiling" not in str(bake_notice):
