@@ -165,22 +165,31 @@ def init_model():
                         # 1. OPTIMIZATION SETTINGS
                         torch._dynamo.config.guard_nn_modules = True
                         torch._dynamo.config.suppress_errors = True
+                        # Explicitly disable CUDA Graphs to prevent memory collisions in auto-regressive models
+                        import torch._inductor.config as inductor_cfg
+                        inductor_cfg.triton.cudagraphs = False
                         
                         base = model.model
                         
-                        # 2. LAYER-WISE TURBO: Max-Autotune + Dynamic Shapes
-                        # dynamic=True stops the 200s re-compilation delay for new lengths.
+                        # 2. LAYER-WISE TURBO: High-Latency (Non-CUDAGraph) Path
+                        # We use mode="default" but with Triton kernels enabled.
+                        # This avoids the "CUDAGraph overwritten" crash while staying 10x faster than Python.
+                        compile_kwargs = {
+                            "mode": "default", 
+                            "dynamic": True
+                        }
+                        
                         if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
-                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.model.layers)} Talker Layers (Dynamic Max-Autotune)...")
+                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.model.layers)} Talker Layers (Stable Triton)...")
                             for i, layer in enumerate(base.talker.model.layers):
-                                base.talker.model.layers[i] = torch.compile(layer, mode="max-autotune", dynamic=True)
+                                base.talker.model.layers[i] = torch.compile(layer, **compile_kwargs)
                         
                         if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
-                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.code_predictor.model.layers)} Predictor Layers (Dynamic Max-Autotune)...")
+                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.code_predictor.model.layers)} Predictor Layers (Stable Triton)...")
                             for i, layer in enumerate(base.talker.code_predictor.model.layers):
-                                base.talker.code_predictor.model.layers[i] = torch.compile(layer, mode="max-autotune", dynamic=True)
+                                base.talker.code_predictor.model.layers[i] = torch.compile(layer, **compile_kwargs)
 
-                        # 3. MULTILINGUAL BAKING
+                        # 3. NITRO-PRIME (Warm-up)
                         print("[startup] ⏳ Baking optimized kernels (Nitro-Prime)...")
                         
                         try:
@@ -796,7 +805,9 @@ def generate_tts_handler(job):
         }
         
     except Exception as e:
+        import traceback
         print(f"Generation error: {e}")
+        traceback.print_exc()
         return {"error": str(e)}
     finally:
         # Cleanup temp file if it was created in /dev/shm
