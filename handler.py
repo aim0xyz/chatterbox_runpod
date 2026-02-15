@@ -50,13 +50,71 @@ LANG_MAP = {
     "es": "spanish"
 }
 
+# --- LAZY TURBO ACTIVATION ---
+# We move the 5-minute heavy math to the first request so RunPod doesn't kill us for "hanging" at startup.
+was_turbo_baked = False
+
+def ensure_turbo_activated():
+    """Trigger the intensive Turbo Mode optimizations on the first request."""
+    global model, was_turbo_baked
+    if was_turbo_baked:
+        return
+    
+    import shutil
+    has_compiler = shutil.which("g++") or shutil.which("clang++") or os.environ.get("CC")
+    
+    if not has_compiler:
+        print("[Turbo] ⚠️ Skipping Turbo: No C++ compiler found.")
+        was_turbo_baked = True
+        return
+
+    print("[Turbo] 🚀 Activating Nitro-Engine (One-time setup)...")
+    try:
+        # 1. OPTIMIZATION SETTINGS
+        torch._dynamo.config.guard_nn_modules = True
+        torch._dynamo.config.suppress_errors = True
+        import torch._inductor.config as inductor_cfg
+        inductor_cfg.triton.cudagraphs = False
+        
+        base = model.model
+        
+        # 2. TARGETED TURBO
+        if hasattr(base, "talker") and hasattr(base.talker, "model"):
+            print("[Turbo] 🏗️  Compiling Talker Backbone (Triton/Dynamic)...")
+            base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
+        
+        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model"):
+            print("[Turbo] 🏗️  Compiling Code Predictor...")
+            base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
+
+        # 3. FLASH-BAKE
+        print("[Turbo] ⏳ Link-Baking kernels...")
+        dummy_ref = None
+        for f in PRESET_ROOT.rglob("*.wav"):
+            dummy_ref = str(f)
+            break
+            
+        if dummy_ref:
+            with torch.inference_mode():
+                model.generate_voice_clone(
+                    text="Nitro engine active.", 
+                    language="english", 
+                    ref_audio=dummy_ref,
+                    x_vector_only_mode=True, 
+                    max_new_tokens=16
+                 )
+        print("[Turbo] ✅ Nitro-Engine Fully Optimized and Ready!")
+    except Exception as e:
+        print(f"[Turbo] ⚠️ Warning: Turbo initialization hit a snag: {e}")
+    
+    was_turbo_baked = True
+
 def init_model():
-    """Load the Qwen3-TTS model with singleton check and warm-up."""
+    """Fast load: Get the model on the GPU and report ACTIVE to RunPod."""
     global model, torch
     if model is not None:
         return
         
-    # Patch for older torch/transformers versions where torch.compiler.is_compiling is checked
     if not hasattr(torch, "compiler"):
         class FakeCompiler:
             def is_compiling(self): return False
@@ -67,30 +125,22 @@ def init_model():
     try:
         from qwen_tts import Qwen3TTSModel
         
-        # Persistence Optimization: Cache compiled kernels on the network volume
-        # This means only ONE worker EVER needs to compile. All others will load from disk.
         cache_dir = "/runpod-volume/.torch_compile_cache"
         os.makedirs(cache_dir, exist_ok=True)
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
         
-        print(f"[startup] Loading Qwen3-TTS model: {MODEL_NAME_OR_PATH}...")
-        print(f"[startup] Persistent cache enabled at: {cache_dir}")
+        print(f"[startup] Fast-Loading Qwen3: {MODEL_NAME_OR_PATH}...")
         
-        # Speed Optimization: Enable TF32 for faster math on modern GPUs
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-        # Silence the 'Scary' Dynamo warnings early (they are normal for complex models)
         try:
             import logging
             logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
             logging.getLogger("torch._inductor").setLevel(logging.ERROR)
-            # Silence the 'code_predictor_config is None' spam at the logger level
             logging.getLogger("qwen_tts.core.models.configuration_qwen3_tts").setLevel(logging.ERROR)
-        except:
-            pass
+        except: pass
         
-        # --- DEEP MONKEYPATCH: Prevent Config Reset ---
         from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSTalkerConfig, Qwen3TTSTalkerCodePredictorConfig
         _old_talker_init = Qwen3TTSTalkerConfig.__init__
         def _patched_talker_init(self, *args, **kwargs):
@@ -99,8 +149,6 @@ def init_model():
             return _old_talker_init(self, *args, **kwargs)
         Qwen3TTSTalkerConfig.__init__ = _patched_talker_init
 
-        # Use PyTorch native SDPA (Scaled Dot Product Attention)
-        # In PyTorch 2.4, this automatically uses Flash Attention kernels on Ada GPUs
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
             device_map="cuda:0",
@@ -108,109 +156,19 @@ def init_model():
             attn_implementation="sdpa"
         )
 
-        # Reduce VRAM pressure for serverless concurrency
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-            print(f"[VRAM] Clean slate: {torch.cuda.memory_allocated()/1e9:.2f}GB used")
+            print(f"[VRAM] Clean load: {torch.cuda.memory_allocated()/1e9:.2f}GB used")
         
-        # Configure tokenizer
         if hasattr(model, 'tokenizer') and model.tokenizer is not None:
             model.tokenizer.padding_side = 'left'
             model.tokenizer.pad_token = model.tokenizer.eos_token
 
-        # --- ATTENTION VERIFICATION ---
-        print(f"\n{'='*60}")
-        print(f"[SDPA] 🔍 Verifying Attention Backend")
-        print(f"{'='*60}")
-        print(f"[SDPA] ✅ Using PyTorch native SDPA (no flash-attn needed)")
-        print(f"[SDPA] Model type: {type(model).__name__}")
-        if torch.cuda.is_available():
-            print(f"[SDPA] GPU: {torch.cuda.get_device_name(0)}")
-            print(f"[SDPA] VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB used")
-        print(f"{'='*60}\n")
-
-        # --- WARM-UP & COMPILATION ---
-        # This forces the 'code_predictor' and 'speaker_encoder' to initialize NOW
-        print("[startup] Warming up model engine...")
-        dummy_ref = str(PRESET_ROOT / "/runpod-volume/preset_voices/en/Owen.wav") # Owen is reliably 24khz
-        if not os.path.exists(dummy_ref):
-            # Fallback to any file in presets
-            for f in PRESET_ROOT.rglob("*.wav"):
-                dummy_ref = str(f)
-                break
-
-        if os.path.exists(dummy_ref):
-            try:
-                # Initial load test (without compilation yet)
-                print("[startup] Testing model base logic...")
-                with torch.inference_mode():
-                    model.generate_voice_clone(
-                        text="Hi.", 
-                        language="english", 
-                        ref_audio=dummy_ref,
-                        x_vector_only_mode=True, 
-                        max_new_tokens=24 # Increased from 1 to avoid empty TensorList
-                    )
-                print("[startup] Base logic OK.")
-                
-                # --- TURBO MODE: TORCH COMPILE ---
-                # Check for C++ compiler first to avoid BackendCompilerFailed on some RunPod images
-                import shutil
-                has_compiler = shutil.which("g++") or shutil.which("clang++") or os.environ.get("CC")
-                
-                if has_compiler:
-                    print("[startup] 🚀 Turbo Mode: Compiling generation function for speed...")
-                    try:
-                        # 1. OPTIMIZATION SETTINGS
-                        torch._dynamo.config.guard_nn_modules = True
-                        torch._dynamo.config.suppress_errors = True
-                        import torch._inductor.config as inductor_cfg
-                        inductor_cfg.triton.cudagraphs = False
-                        
-                        base = model.model
-                        
-                        # 2. TARGETED TURBO: Compile the core "Math Engines" 
-                        # We compile the backbone models as single units. 
-                        # This is much faster than 33 individual layer compiles and avoids the restart loop.
-                        if hasattr(base, "talker") and hasattr(base.talker, "model"):
-                            print("[startup] 🚀 Turbo Mode: Optimizing Talker Backbone...")
-                            base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
-                        
-                        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model"):
-                            print("[startup] 🚀 Turbo Mode: Optimizing Code Predictor...")
-                            base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
-
-                        # 3. FLASH-BAKE (Fast Warm-up)
-                        # We do one quick request just to bind the kernels. 
-                        # We use minimal tokens to stay under the RunPod health-check timeout.
-                        print("[startup] ⏳ Flash-Baking optimized kernels...")
-                        try:
-                            with torch.inference_mode():
-                                model.generate_voice_clone(
-                                    text="Turbo engine active.", 
-                                    language="english", 
-                                    ref_audio=dummy_ref,
-                                    x_vector_only_mode=True, 
-                                    max_new_tokens=16
-                                )
-                        except Exception as bake_notice:
-                            if "is_compiling" not in str(bake_notice):
-                                print(f"[startup] ⚠️ Baking notice: {bake_notice}")
-                        
-                        print("[startup] ✅ Turbo Engine Ready!")
-                    except Exception as e:
-                        print(f"[startup] ⚠️ Turbo Mode failed to initialize: {e}")
-                else:
-                    print("[startup] ⚠️ Turbo Mode DISABLED: No C++ compiler (g++) found.")
-            except Exception as e:
-                print(f"[startup] Warm-up/Compilation skipped: {e}")
-        
-        print("[startup] Model loaded successfully into GPU!")
+        print("[startup] Base model ready (Turbo will activate on FIRST request).")
     except Exception as e:
-        print(f"[startup] Error loading model: {e}")
+        print(f"[startup] Critical Error loading model: {e}")
 
-# Call init once at startup
+# Call light init at startup
 if __name__ == "__main__" or os.environ.get("RUNPOD_AGENT_ID"):
     init_model()
 
@@ -839,6 +797,10 @@ def clone_voice_handler(job):
 # ==========================================
 def handler(job):
     """Entry point for RunPod."""
+    # This activates the 5-minute Turbo optimization only on the first request 
+    # to avoid hitting RunPod's 5-minute startup timeout.
+    ensure_turbo_activated()
+    
     inp = job.get("input", {})
     action = inp.get("action", "generate_tts")
     
