@@ -59,18 +59,33 @@ def init_model():
     try:
         from qwen_tts import Qwen3TTSModel
         
+        # Persistence Optimization: Cache compiled kernels on the network volume
+        # This means only ONE worker EVER needs to compile. All others will load from disk.
+        cache_dir = "/runpod-volume/.torch_compile_cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
+        
         print(f"[startup] Loading Qwen3-TTS model: {MODEL_NAME_OR_PATH}...")
+        print(f"[startup] Persistent cache enabled at: {cache_dir}")
         
         # Speed Optimization: Enable TF32 for faster math on modern GPUs
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+
+        # Silence the 'Scary' Dynamo warnings early (they are normal for complex models)
+        try:
+            import logging
+            logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
+            logging.getLogger("torch._inductor").setLevel(logging.ERROR)
+        except:
+            pass
         
         # Use PyTorch native SDPA (Scaled Dot Product Attention)
         # No flash-attn compilation needed — works on T4, A10G, L4, etc.
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
             device_map="cuda:0",
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             attn_implementation="sdpa"
         )
 
@@ -108,15 +123,17 @@ def init_model():
 
         if os.path.exists(dummy_ref):
             try:
+                # Initial load test (without compilation yet)
+                print("[startup] Testing model base logic...")
                 with torch.inference_mode():
                     model.generate_voice_clone(
                         text="Hi.", 
                         language="english", 
                         ref_audio=dummy_ref,
-                        x_vector_only_mode=True, # MUST match generation logic
-                        max_new_tokens=5
+                        x_vector_only_mode=True, 
+                        max_new_tokens=1
                     )
-                print("[startup] Warm-up complete!")
+                print("[startup] Base logic OK.")
                 
                 # --- TURBO MODE: TORCH COMPILE ---
                 # Check for C++ compiler first to avoid BackendCompilerFailed on some RunPod images
@@ -124,16 +141,32 @@ def init_model():
                 has_compiler = shutil.which("g++") or shutil.which("clang++") or os.environ.get("CC")
                 
                 if has_compiler:
-                    print("[startup] 🚀 Turbo Mode: Compiling generation function for 100+ tokens/s...")
+                    print("[startup] 🚀 Turbo Mode: Compiling generation function for speed...")
                     try:
-                        # mode="reduce-overhead" is great for TTS but requires a stable environment
-                        # We use fullgraph=False to allow for some dynamic shapes if needed
+                        # Silence Dynamo warnings
+                        try:
+                            import torch._logging
+                            torch._logging.set_logs(dynamo=torch._logging.log_levels.ERROR)
+                        except: pass
+
+                        # CHANGE: Use mode="default". 
+                        # "reduce-overhead" takes 15+ mins to compile because of CUDA Graphs.
+                        # "default" is much faster (1-2 mins) and still provides a good boost.
                         model.generate_voice_clone = torch.compile(
                             model.generate_voice_clone, 
-                            mode="reduce-overhead",
+                            mode="default",
                             fullgraph=False
                         )
-                        print("[startup] ✅ Compilation initialized.")
+                        
+                        # FORCE COMPILATION NOW (while starting up)
+                        # We do a tiny generation to 'bake' the first kernels
+                        print("[startup] ⏳ Baking optimized kernels (this prevents the first request from timing out)...")
+                        with torch.inference_mode():
+                            model.generate_voice_clone(
+                                text="Hi.", language="english", ref_audio=dummy_ref,
+                                x_vector_only_mode=True, max_new_tokens=5
+                            )
+                        print("[startup] ✅ Compilation & Warm-up complete!")
                     except Exception as compile_err:
                         print(f"[startup] ⚠️ Turbo Mode failed to initialize: {compile_err}")
                 else:
