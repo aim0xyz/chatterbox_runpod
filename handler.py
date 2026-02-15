@@ -155,6 +155,8 @@ def init_model():
                         try:
                             import torch._logging
                             torch._logging.set_logs(dynamo=torch._logging.log_levels.ERROR)
+                        except: pass
+
                         # 1. DEEP PATCH: Fix the 'is_compiling' collision
                         # This prevents the 'transformers' library from crashing the compiler 
                         # when it tries to check its own status.
