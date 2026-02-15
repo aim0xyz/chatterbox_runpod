@@ -169,16 +169,16 @@ def init_model():
                         base = model.model
                         
                         # 2. LAYER-WISE TURBO: Target the heavy math, keep the loop flexible
-                        # This avoids the "Trace-Thrashing" that caused the 3 tokens/s slowdown.
+                        # Use 'default' mode (Triton) to avoid CUDA Graph collisions in PT 2.4+
                         if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
                             print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.model.layers)} Talker Layers...")
                             for i, layer in enumerate(base.talker.model.layers):
-                                base.talker.model.layers[i] = torch.compile(layer, mode="reduce-overhead")
+                                base.talker.model.layers[i] = torch.compile(layer, mode="default")
                         
                         if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
                             print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.code_predictor.model.layers)} Predictor Layers...")
                             for i, layer in enumerate(base.talker.code_predictor.model.layers):
-                                base.talker.code_predictor.model.layers[i] = torch.compile(layer, mode="reduce-overhead")
+                                base.talker.code_predictor.model.layers[i] = torch.compile(layer, mode="default")
 
                         # 3. MULTILINGUAL BAKING (Bilingual Prime)
                         print("[startup] ⏳ Baking optimized kernels (Multilingual Prime)...")
@@ -191,15 +191,15 @@ def init_model():
                                     language="english", 
                                     ref_audio=dummy_ref,
                                     x_vector_only_mode=True, 
-                                    max_new_tokens=64
+                                    max_new_tokens=128
                                 )
-                                # Prime German (Handles German-specific token shapes)
+                                # Prime German
                                 model.generate_voice_clone(
                                     text="Turbo-Modus ist jetzt aktiv.", 
                                     language="german", 
                                     ref_audio=dummy_ref,
                                     x_vector_only_mode=True, 
-                                    max_new_tokens=64
+                                    max_new_tokens=128
                                 )
                         except Exception as bake_notice:
                             if "is_compiling" not in str(bake_notice):
@@ -716,7 +716,7 @@ def generate_tts_handler(job):
                 gen_kwargs["x_vector_only_mode"] = True
             
             # Generate this specific chunk with Turbo Speed
-            with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
             
             # Sync GPU after generation
