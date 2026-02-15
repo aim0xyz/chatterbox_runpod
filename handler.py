@@ -149,27 +149,39 @@ def init_model():
                             torch._logging.set_logs(dynamo=torch._logging.log_levels.ERROR)
                         except: pass
 
-                        # SURGICAL OPTIMIZATION: Compile the math-heavy components specifically.
-                        # Compiling the high-level 'model.model' was hitting graph breaks.
-                        # We target the core 'talker' which is where 99% of the work happens.
-                        if hasattr(model.model, "talker"):
-                            print("[startup] 🚀 Compiling 'talker' engine...")
-                            model.model.talker = torch.compile(model.model.talker, mode="default")
+                        # DEEP OPTIMIZATION: Target the internal transformer backbones exactly.
+                        # We go two levels deep to avoid the 'generate' logic wrappers.
+                        base = model.model
                         
-                        if hasattr(model.model, "code_predictor"):
-                            print("[startup] 🚀 Compiling 'code_predictor' engine...")
-                            model.model.code_predictor = torch.compile(model.model.code_predictor, mode="default")
+                        # 1. Compile the Main Talker Backbone
+                        if hasattr(base, "talker") and hasattr(base.talker, "model"):
+                            print("[startup] 🚀 Turbo Mode: Optimizing Talker Backbone...")
+                            base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
+                        
+                        # 2. Compile the Code Predictor Backbone
+                        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model"):
+                            print("[startup] 🚀 Turbo Mode: Optimizing Code Predictor...")
+                            base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
+
+                        # DEBUG: Print structure if anything was missed
+                        print(f"[startup] Model Engine: {type(base).__name__}")
                         
                         # FORCE COMPILATION NOW (while starting up)
-                        print("[startup] ⏳ Baking optimized kernels (this should take 1-2 mins)...")
-                        # Temporarily allow errors so we can see why it might fail
+                        print("[startup] ⏳ Baking optimized kernels (this MUST take 1-2 mins to be effective)...")
+                        # Allow errors during baking so we can see what's happening
                         torch._dynamo.config.suppress_errors = False 
                         
-                        with torch.inference_mode():
-                            model.generate_voice_clone(
-                                text="Warmup.", language="english", ref_audio=dummy_ref,
-                                x_vector_only_mode=True, max_new_tokens=48
-                            )
+                        try:
+                            with torch.inference_mode():
+                                model.generate_voice_clone(
+                                    text="Warmup phrase for optimization.", 
+                                    language="english", 
+                                    ref_audio=dummy_ref,
+                                    x_vector_only_mode=True, 
+                                    max_new_tokens=64
+                                )
+                        except Exception as bake_err:
+                            print(f"[startup] ⚠️ Baking warning/error: {bake_err}")
                         
                         torch._dynamo.config.suppress_errors = True
                         print("[startup] ✅ Compilation & Warm-up complete!")
@@ -177,7 +189,6 @@ def init_model():
                         print(f"[startup] ⚠️ Turbo Mode failed to initialize: {compile_err}")
                 else:
                     print("[startup] ⚠️ Turbo Mode DISABLED: No C++ compiler (g++) found.")
-                    print("[startup] Tip: Run 'apt-get install g++' for 2x faster performance.")
             except Exception as e:
                 print(f"[startup] Warm-up/Compilation skipped: {e}")
         
