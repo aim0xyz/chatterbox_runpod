@@ -100,7 +100,7 @@ def init_model():
         Qwen3TTSTalkerConfig.__init__ = _patched_talker_init
 
         # Use PyTorch native SDPA (Scaled Dot Product Attention)
-        # No flash-attn compilation needed — works on T4, A10G, L4, etc.
+        # In PyTorch 2.4, this automatically uses Flash Attention kernels on Ada GPUs
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
             device_map="cuda:0",
@@ -168,20 +168,20 @@ def init_model():
                         
                         base = model.model
                         
-                        # 2. LAYER-WISE TURBO: Target the heavy math, keep the loop flexible
-                        # Use 'default' mode (Triton) to avoid CUDA Graph collisions in PT 2.4+
+                        # 2. LAYER-WISE TURBO: Max-Autotune + Dynamic Shapes
+                        # dynamic=True stops the 200s re-compilation delay for new lengths.
                         if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
-                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.model.layers)} Talker Layers...")
+                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.model.layers)} Talker Layers (Dynamic Max-Autotune)...")
                             for i, layer in enumerate(base.talker.model.layers):
-                                base.talker.model.layers[i] = torch.compile(layer, mode="default")
+                                base.talker.model.layers[i] = torch.compile(layer, mode="max-autotune", dynamic=True)
                         
                         if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
-                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.code_predictor.model.layers)} Predictor Layers...")
+                            print(f"[startup] 🚀 Turbo Mode: Optimizing {len(base.talker.code_predictor.model.layers)} Predictor Layers (Dynamic Max-Autotune)...")
                             for i, layer in enumerate(base.talker.code_predictor.model.layers):
-                                base.talker.code_predictor.model.layers[i] = torch.compile(layer, mode="default")
+                                base.talker.code_predictor.model.layers[i] = torch.compile(layer, mode="max-autotune", dynamic=True)
 
-                        # 3. MULTILINGUAL BAKING (Bilingual Prime)
-                        print("[startup] ⏳ Baking optimized kernels (Multilingual Prime)...")
+                        # 3. MULTILINGUAL BAKING
+                        print("[startup] ⏳ Baking optimized kernels (Nitro-Prime)...")
                         
                         try:
                             with torch.inference_mode():
