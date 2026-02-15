@@ -52,7 +52,7 @@ LANG_MAP = {
 
 def init_model():
     """Load the Qwen3-TTS model with singleton check and warm-up."""
-    global model
+    global model, torch
     if model is not None:
         return
         
