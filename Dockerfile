@@ -30,7 +30,7 @@ RUN apt-get update && \
 # Consolidate pip installs to prevent redundant 1.3GB CUDA re-downloads
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
-    git+https://github.com/QwenLM/Qwen3-TTS.git \
+    git+https://github.com/aim0xyz/qwen3-tts_aimoxyz.git \
     -r requirements.txt
 
 # Copy the application code
