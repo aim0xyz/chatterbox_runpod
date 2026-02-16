@@ -629,57 +629,57 @@ def generate_tts_handler(job):
         print(f"[PROFILER] 🔍 DEEP PERFORMANCE ANALYSIS")
         print(f"{'='*60}\n")
 
-            # BATCH GENERATION: Process all chunks in parallel for 100+ tokens/s throughput!
-            limit = 1024
-            print(f"[TTS] 🚀 Starting BATCH processing of {len(text_chunks)} chunks...")
+        # BATCH GENERATION: Process all chunks in parallel for 100+ tokens/s throughput!
+        limit = 1024
+        print(f"[TTS] 🚀 Starting BATCH processing of {len(text_chunks)} chunks...")
+        
+        gen_kwargs = dict(
+            text=text_chunks,   # Pass list of strings for batching
+            language=language,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            top_k=top_k,
+            max_new_tokens=limit,
+            subtalker_dosample=True,
+            subtalker_temperature=subtalker_temperature,
+            subtalker_top_k=subtalker_top_k,
+            subtalker_top_p=subtalker_top_p,
+            subtalker_repetition_penalty=subtalker_repetition_penalty,
+        )
+        
+        if voice_clone_prompt is not None:
+            gen_kwargs["voice_clone_prompt"] = voice_clone_prompt
+        else:
+            gen_kwargs["ref_audio"] = str(voice_path)
+            gen_kwargs["ref_text"] = None
+            gen_kwargs["x_vector_only_mode"] = True
+        
+        # Sync GPU
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        
+        t0 = time.time()
+        
+        # Single Batched Call
+        with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
+        
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
             
-            gen_kwargs = dict(
-                text=text_chunks,   # Pass list of strings for batching
-                language=language,
-                temperature=temperature,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                top_k=top_k,
-                max_new_tokens=limit,
-                subtalker_dosample=True,
-                subtalker_temperature=subtalker_temperature,
-                subtalker_top_k=subtalker_top_k,
-                subtalker_top_p=subtalker_top_p,
-                subtalker_repetition_penalty=subtalker_repetition_penalty,
-            )
+        batch_time = time.time() - t0
+        print(f"[PROFILER] 🚀 Batch Generation Complete in {batch_time:.2f}s")
+        
+        # Process results (add pauses)
+        sr = sample_rate
+        for i, (wav, chunk_text) in enumerate(zip(wavs, text_chunks)):
+            all_audio.append(wav)
             
-            if voice_clone_prompt is not None:
-                gen_kwargs["voice_clone_prompt"] = voice_clone_prompt
-            else:
-                gen_kwargs["ref_audio"] = str(voice_path)
-                gen_kwargs["ref_text"] = None
-                gen_kwargs["x_vector_only_mode"] = True
-            
-            # Sync GPU
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            
-            t0 = time.time()
-            
-            # Single Batched Call
-            with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
-            
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                
-            batch_time = time.time() - t0
-            print(f"[PROFILER] 🚀 Batch Generation Complete in {batch_time:.2f}s")
-            
-            # Process results (add pauses)
-            sr = sample_rate
-            for i, (wav, chunk_text) in enumerate(zip(wavs, text_chunks)):
-                all_audio.append(wav)
-                
-                # Add variable silence
-                if i < len(text_chunks) - 1:
-                    pause = get_pause_duration_after_chunk(chunk_text, sr)
-                    all_audio.append(pause)
+            # Add variable silence
+            if i < len(text_chunks) - 1:
+                pause = get_pause_duration_after_chunk(chunk_text, sr)
+                all_audio.append(pause)
             
         # Combine pieces
         final_audio = np.concatenate(all_audio)
