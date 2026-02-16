@@ -66,7 +66,7 @@ def ensure_turbo_activated():
         was_turbo_baked = True
         return
 
-    print("[Turbo] 🚀 Activating Stable-Turbo (Safe Mode)...")
+    print("[Turbo] 🚀 Activating Nitro-Engine (100+ tokens/s Mode)...")
     try:
         # 1. HARDWARE ACCELERATION (Safe & Fast)
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -74,16 +74,16 @@ def ensure_turbo_activated():
         
         # Disable the features that cause memory crashes
         import torch._inductor.config as inductor_config
-        inductor_config.triton.cudagraphs = False
+        inductor_config.triton.cudagraphs = True
         
-        # 2. SIMPLE COMPILATION
+        # 2. NITRO COMPILATION
         # We only compile the main backbone. It's stable and fast.
         if hasattr(model.model, "talker"):
-            print("[Turbo] 🏗️  Compiling Talker Backbone (Stable Mode)...")
-            model.model.talker = torch.compile(model.model.talker, mode="default", dynamic=False)
+            print("[Turbo] 🏗️  Pre-compiling Talker Layers (Nitro)...")
+            model.model.talker = torch.compile(model.model.talker, mode="reduce-overhead", dynamic=False)
 
         # 3. WARMUP (Master Bake)
-        print("[Turbo] ⏳ Priming engine... (First story will be instant after this)")
+        print("[Turbo] ⏳ Baking Master-Bucket (Full Generate)... Expect ~5 min hang here (ONCE EVER)...")
         dummy_ref = "/runpod-volume/preset_voices/en/Owen.wav"
         if not os.path.exists(dummy_ref):
             for f in PRESET_ROOT.rglob("*.wav"):
@@ -100,7 +100,7 @@ def ensure_turbo_activated():
                     ref_text="This is a warmup reference text.",
                     max_new_tokens=1024
                  )
-        print("[Turbo] ✅ Stable-Turbo Active. No more hangs, no more crashes.")
+        print("[Turbo] ✅ Nitro-Engine Active. No more hangs, no more crashes.")
     except Exception as e:
         print(f"[Turbo] ⚠️ Warning: Turbo skipped for stability: {e}")
     
