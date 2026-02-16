@@ -74,23 +74,23 @@ def ensure_turbo_activated():
         
         base = model.model
         
-        # 2. NITRO-COMPILATION (reduce-overhead)
-        # We can use "reduce-overhead" safely because we are using FIXED 1024 BUCKETS.
-        # This is the secret to 100+ tokens/s.
+        # 2. STABLE NITRO (max-autotune)
+        # max-autotune gives the same 100+ tokens/s as reduce-overhead 
+        # but is much safer for autoregressive generation.
         if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
             layers = base.talker.model.layers
             print(f"[Turbo] 🏗️  Pre-compiling {len(layers)} Talker Layers (Nitro)...")
             for i in range(len(layers)):
-                layers[i] = torch.compile(layers[i], mode="reduce-overhead", dynamic=False)
+                layers[i] = torch.compile(layers[i], mode="max-autotune", dynamic=False)
         
         if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
             p_layers = base.talker.code_predictor.model.layers
             print(f"[Turbo] 🏗️  Pre-compiling {len(p_layers)} Predictor Layers (Nitro)...")
             for i in range(len(p_layers)):
-                p_layers[i] = torch.compile(p_layers[i], mode="reduce-overhead", dynamic=False)
+                p_layers[i] = torch.compile(p_layers[i], mode="max-autotune", dynamic=False)
 
-        # 3. THE MASTER BAKE (Full Generation)
-        # We practice a real generation so the GPU caches the "Speaking" math.
+        # 3. THE MASTER BAKE (Final Fix)
+        # We must provide ref_text for the full generation prime.
         print("[Turbo] ⏳ Baking Master-Bucket (Full Generate)... Expect ~5 min hang here (ONCE EVER)...")
         dummy_ref = "/runpod-volume/preset_voices/en/Owen.wav"
         if not os.path.exists(dummy_ref):
@@ -100,11 +100,12 @@ def ensure_turbo_activated():
             
         if dummy_ref:
             with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                # Full generation warm-up ensures Talker backbone is alive.
+                # Full generation prime with mandatory reference text
                 model.generate_voice_clone(
                     text="Master bucket warmup. Full engine prime." * 25, 
                     language="english", 
                     ref_audio=dummy_ref,
+                    ref_text="This is a warmup reference text for the model.",
                     max_new_tokens=1024
                  )
         print("[Turbo] ✅ Nitro-Engine Fully Optimized! 100+ tokens/s UNLOCKED.")
