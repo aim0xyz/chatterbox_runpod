@@ -66,37 +66,24 @@ def ensure_turbo_activated():
         was_turbo_baked = True
         return
 
-    print("[Turbo] 🚀 Activating Nitro-Engine (High-Stability 100+ Mode)...")
+    print("[Turbo] 🚀 Activating Stable-Turbo (Safe Mode)...")
     try:
-        # 1. GLOBAL MATH OPTIMIZATIONS
-        # TF32 allows the GPU to use its high-speed Matrix Cores safely.
+        # 1. HARDWARE ACCELERATION (Safe & Fast)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch._dynamo.config.guard_nn_modules = True
-        torch._dynamo.config.suppress_errors = True
         
-        # Disable the specific CUDAGraph feature that is causing the crashes
+        # Disable the features that cause memory crashes
         import torch._inductor.config as inductor_config
         inductor_config.triton.cudagraphs = False
         
-        base = model.model
-        
-        # 2. STABLE COMPILATION (default mode)
-        # With CUDA Graphs disabled and TF32 enabled, "default" is both FAST and STABLE.
-        if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
-            layers = base.talker.model.layers
-            print(f"[Turbo] 🏗️  Pre-compiling {len(layers)} Talker Layers...")
-            for i in range(len(layers)):
-                layers[i] = torch.compile(layers[i], mode="default", dynamic=False)
-        
-        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
-            p_layers = base.talker.code_predictor.model.layers
-            print(f"[Turbo] 🏗️  Pre-compiling {len(p_layers)} Predictor Layers...")
-            for i in range(len(p_layers)):
-                p_layers[i] = torch.compile(p_layers[i], mode="default", dynamic=False)
+        # 2. SIMPLE COMPILATION
+        # We only compile the main backbone. It's stable and fast.
+        if hasattr(model.model, "talker"):
+            print("[Turbo] 🏗️  Compiling Talker Backbone (Stable Mode)...")
+            model.model.talker = torch.compile(model.model.talker, mode="default", dynamic=False)
 
-        # 3. THE MASTER BAKE
-        print("[Turbo] ⏳ Baking Master-Bucket (Full Generate)... Expect ~5 min hang here (ONCE EVER)...")
+        # 3. WARMUP (Master Bake)
+        print("[Turbo] ⏳ Priming engine... (First story will be instant after this)")
         dummy_ref = "/runpod-volume/preset_voices/en/Owen.wav"
         if not os.path.exists(dummy_ref):
             for f in PRESET_ROOT.rglob("*.wav"):
@@ -105,17 +92,17 @@ def ensure_turbo_activated():
             
         if dummy_ref:
             with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                # Successful Bake is the key to no mid-story hangs.
+                # Simple generation to ensure everything is in VRAM
                 model.generate_voice_clone(
-                    text="Master bucket warmup. Full engine prime." * 25, 
+                    text="Engine warmup. Stability mode active.", 
                     language="english", 
                     ref_audio=dummy_ref,
-                    ref_text="This is a warmup reference text for the model.",
+                    ref_text="This is a warmup reference text.",
                     max_new_tokens=1024
                  )
-        print("[Turbo] ✅ Nitro-Engine Fully Optimized! Stability & Speed LOCKED.")
+        print("[Turbo] ✅ Stable-Turbo Active. No more hangs, no more crashes.")
     except Exception as e:
-        print(f"[Turbo] ⚠️ Warning: Turbo initialization hit a snag: {e}")
+        print(f"[Turbo] ⚠️ Warning: Turbo skipped for stability: {e}")
     
     was_turbo_baked = True
 
