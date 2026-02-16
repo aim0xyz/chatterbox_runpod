@@ -32,7 +32,18 @@ RUN apt-get update && \
 RUN pip install --no-cache-dir https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
 
 # Consolidate pip installs
+# Consolidate pip installs
+# Consolidate pip installs
 COPY requirements.txt .
+
+# ---------------------------------------------------------
+# CACHE BUSTER:
+# This fetches the latest commit hash from GitHub.
+# If the repo changes, this line invalidates the Docker cache,
+# forcing a fresh clone/install in the next step.
+# ---------------------------------------------------------
+ADD https://api.github.com/repos/aim0xyz/qwen3-tts_aimoxyz/git/refs/heads/main version.json
+
 RUN pip install --no-cache-dir \
     git+https://github.com/aim0xyz/qwen3-tts_aimoxyz.git \
     -r requirements.txt
