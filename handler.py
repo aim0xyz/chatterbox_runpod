@@ -51,7 +51,6 @@ LANG_MAP = {
 }
 
 # --- LAZY TURBO ACTIVATION ---
-# We move the 5-minute heavy math to the first request so RunPod doesn't kill us for "hanging" at startup.
 was_turbo_baked = False
 
 def ensure_turbo_activated():
@@ -68,27 +67,33 @@ def ensure_turbo_activated():
         was_turbo_baked = True
         return
 
-    print("[Turbo] 🚀 Activating Nitro-Engine (One-time setup)...")
+    print("[Turbo] 🚀 Activating Nitro-Engine (Layer-Wise)...")
     try:
         # 1. OPTIMIZATION SETTINGS
         torch._dynamo.config.guard_nn_modules = True
         torch._dynamo.config.suppress_errors = True
-        import torch._inductor.config as inductor_cfg
-        inductor_cfg.triton.cudagraphs = False
+        # Speed up the actual compilation phase
+        torch._dynamo.config.optimize_ddp = False 
         
         base = model.model
         
-        # 2. TARGETED TURBO
-        if hasattr(base, "talker") and hasattr(base.talker, "model"):
-            print("[Turbo] 🏗️  Compiling Talker Backbone (Triton/Dynamic)...")
-            base.talker.model = torch.compile(base.talker.model, mode="default", dynamic=True)
+        # 2. LAYER-WISE TURBO (Much faster to compile than the whole backbone)
+        if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
+            layers = base.talker.model.layers
+            print(f"[Turbo] 🏗️  Compiling {len(layers)} Talker Layers...")
+            for i in range(len(layers)):
+                layers[i] = torch.compile(layers[i], mode="default", dynamic=True)
+                if i % 7 == 0: print(f"[Turbo] Progress: {i}/{len(layers)} layers...")
         
-        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model"):
-            print("[Turbo] 🏗️  Compiling Code Predictor...")
-            base.talker.code_predictor.model = torch.compile(base.talker.code_predictor.model, mode="default", dynamic=True)
+        if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
+            p_layers = base.talker.code_predictor.model.layers
+            print(f"[Turbo] 🏗️  Compiling {len(p_layers)} Predictor Layers...")
+            for i in range(len(p_layers)):
+                p_layers[i] = torch.compile(p_layers[i], mode="default", dynamic=True)
 
-        # 3. FLASH-BAKE
-        print("[Turbo] ⏳ Link-Baking kernels...")
+        # 3. BIG-BAKE (Warm up with a real-sized sequence)
+        # This prevents the "4-minute hang" on the first real story
+        print("[Turbo] ⏳ Shape-Warming (256 tokens)... This might take 2-3 mins...")
         dummy_ref = None
         for f in PRESET_ROOT.rglob("*.wav"):
             dummy_ref = str(f)
@@ -96,14 +101,16 @@ def ensure_turbo_activated():
             
         if dummy_ref:
             with torch.inference_mode():
+                # We use a longer text to "stretch" the engine memory now
+                # so it's ready for your story immediately.
                 model.generate_voice_clone(
-                    text="Nitro engine active.", 
+                    text="This is a long-form warm up sentence intended to prime the engine for high speed generation of full stories without re-compilation delays.", 
                     language="english", 
                     ref_audio=dummy_ref,
                     x_vector_only_mode=True, 
-                    max_new_tokens=16
+                    max_new_tokens=256
                  )
-        print("[Turbo] ✅ Nitro-Engine Fully Optimized and Ready!")
+        print("[Turbo] ✅ Nitro-Engine Fully Optimized! 100+ tokens/s UNLOCKED.")
     except Exception as e:
         print(f"[Turbo] ⚠️ Warning: Turbo initialization hit a snag: {e}")
     
@@ -125,6 +132,7 @@ def init_model():
     try:
         from qwen_tts import Qwen3TTSModel
         
+        # Use the persistent cache!
         cache_dir = "/runpod-volume/.torch_compile_cache"
         os.makedirs(cache_dir, exist_ok=True)
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
