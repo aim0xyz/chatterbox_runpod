@@ -27,13 +27,11 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install qwen-tts from source
-RUN pip install --no-cache-dir git+https://github.com/QwenLM/Qwen3-TTS.git
-
-# Install remaining dependencies from requirements.txt
-# IMPORTANT: No flash-attn here — we use SDPA instead
+# Consolidate pip installs to prevent redundant 1.3GB CUDA re-downloads
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir \
+    git+https://github.com/QwenLM/Qwen3-TTS.git \
+    -r requirements.txt
 
 # Copy the application code
 COPY handler.py .
