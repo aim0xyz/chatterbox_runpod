@@ -15,6 +15,145 @@ from pathlib import Path
 from pydub import AudioSegment
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
+from typing import List, Union, Optional, Dict, Any, Tuple
+
+# ==========================================
+# MONKEY PATCH: Fix Qwen3TTSModel methods
+# ==========================================
+try:
+    print("[MonkeyPatch] Applying critical fixes to Qwen3TTSModel...")
+    from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
+    
+    # 1. FIX: Enforce Padding for Stable Compilation
+    def fixed_tokenize_texts(self, texts: List[str]) -> List[torch.Tensor]:
+        input_ids = []
+        for text in texts:
+            input = self.processor(
+                text=text, 
+                return_tensors="pt", 
+                padding="max_length", 
+                max_length=1024,
+                truncation=True
+            )
+            input_id = input["input_ids"].to(self.device)
+            input_id = input_id.unsqueeze(0) if input_id.dim() == 1 else input_id
+            input_ids.append(input_id)
+        return input_ids
+
+    # 2. FIX: Sequential Decoding to prevent Masking Crash in Batched Inference
+    @torch.no_grad()
+    def fixed_generate_voice_clone(
+        self,
+        text,
+        language=None,
+        ref_audio=None,
+        ref_text=None,
+        x_vector_only_mode=False,
+        voice_clone_prompt=None,
+        non_streaming_mode=False,
+        **kwargs,
+    ):
+        if self.model.tts_model_type != "base":
+            raise ValueError("Model does not support generate_voice_clone")
+        
+        texts = self._ensure_list(text)
+        languages = self._ensure_list(language) if isinstance(language, list) else ([language] * len(texts) if language is not None else ["Auto"] * len(texts))
+        if len(languages) == 1 and len(texts) > 1:
+            languages = languages * len(texts)
+        if len(texts) != len(languages):
+            raise ValueError(f"Batch size mismatch: text={len(texts)}, language={len(languages)}")
+
+        self._validate_languages(languages)
+
+        if voice_clone_prompt is None:
+            if ref_audio is None:
+                raise ValueError("Either `voice_clone_prompt` or `ref_audio` must be provided.")
+            prompt_items = self.create_voice_clone_prompt(ref_audio=ref_audio, ref_text=ref_text, x_vector_only_mode=x_vector_only_mode)
+            if len(prompt_items) == 1 and len(texts) > 1:
+                prompt_items = prompt_items * len(texts)
+            if len(prompt_items) != len(texts):
+                raise ValueError(f"Batch size mismatch: prompt={len(prompt_items)}, text={len(texts)}")
+            voice_clone_prompt_dict = self._prompt_items_to_voice_clone_prompt(prompt_items)
+            ref_texts_for_ids = [it.ref_text for it in prompt_items]
+        else:
+            if isinstance(voice_clone_prompt, list):
+                prompt_items = voice_clone_prompt
+                if len(prompt_items) == 1 and len(texts) > 1:
+                    prompt_items = prompt_items * len(texts)
+                if len(prompt_items) != len(texts):
+                    raise ValueError(f"Batch size mismatch: prompt={len(prompt_items)}, text={len(texts)}")
+                voice_clone_prompt_dict = self._prompt_items_to_voice_clone_prompt(prompt_items)
+                ref_texts_for_ids = [it.ref_text for it in prompt_items]
+            else:
+                voice_clone_prompt_dict = voice_clone_prompt
+                ref_texts_for_ids = None
+
+        input_texts = [self._build_assistant_text(t) for t in texts]
+        # This calls our patched _tokenize_texts if bound correctly, or we call it directly?
+        # self._tokenize_texts is bound to the instance, so it should call the patched version if patched on class.
+        input_ids = self._tokenize_texts(input_texts)
+
+        ref_ids = None
+        if ref_texts_for_ids is not None:
+            ref_ids = []
+            for i, rt in enumerate(ref_texts_for_ids):
+                if rt is None or rt == "":
+                    ref_ids.append(None)
+                else:
+                    ref_tok = self._tokenize_texts([self._build_ref_text(rt)])[0]
+                    ref_ids.append(ref_tok)
+
+        gen_kwargs = self._merge_generate_kwargs(**kwargs)
+
+        talker_codes_list, _ = self.model.generate(
+            input_ids=input_ids,
+            ref_ids=ref_ids,
+            voice_clone_prompt=voice_clone_prompt_dict,
+            languages=languages,
+            non_streaming_mode=non_streaming_mode,
+            **gen_kwargs,
+        )
+
+        codes_for_decode = []
+        for i, codes in enumerate(talker_codes_list):
+            ref_code_list = voice_clone_prompt_dict.get("ref_code", None)
+            if ref_code_list is not None and ref_code_list[i] is not None:
+                codes_for_decode.append(torch.cat([ref_code_list[i].to(codes.device), codes], dim=0))
+            else:
+                codes_for_decode.append(codes)
+
+        # --- FIX: Sequential Decode ---
+        wavs_all = []
+        fs = 48000
+        for c in codes_for_decode:
+             w_batch, f_batch = self.model.speech_tokenizer.decode([{"audio_codes": c}])
+             wavs_all.append(w_batch[0])
+             fs = f_batch
+        # ------------------------------
+
+        wavs_out = []
+        for i, wav in enumerate(wavs_all):
+            ref_code_list = voice_clone_prompt_dict.get("ref_code", None)
+            if ref_code_list is not None and ref_code_list[i] is not None:
+                ref_len = int(ref_code_list[i].shape[0])
+                total_len = int(codes_for_decode[i].shape[0])
+                cut = int(ref_len / max(total_len, 1) * wav.shape[0])
+                wavs_out.append(wav[cut:])
+            else:
+                wavs_out.append(wav)
+        
+        return wavs_out, fs
+
+    # Apply Patches
+    Qwen3TTSModel._tokenize_texts = fixed_tokenize_texts
+    Qwen3TTSModel.generate_voice_clone = fixed_generate_voice_clone
+    print("[MonkeyPatch] ✅ SUCCESS: Patched Qwen3TTSModel with padding & sequential decoding.")
+
+except Exception as e:
+    print(f"[MonkeyPatch] ❌ FAILED to patch model: {e}")
+    # We continue, but it might crash if not patched.
+
+
 
 # ==========================================
 # CONFIGURATION
