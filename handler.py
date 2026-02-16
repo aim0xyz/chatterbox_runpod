@@ -24,23 +24,33 @@ try:
     print("[MonkeyPatch] Applying critical fixes to Qwen3TTSModel...")
     from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
     
-    # 1. FIX: Enforce Padding for Stable Compilation
-    def fixed_tokenize_texts(self, texts: List[str]) -> List[torch.Tensor]:
-        input_ids = []
-        for text in texts:
-            input = self.processor(
-                text=text, 
-                return_tensors="pt", 
-                padding="max_length", 
+    # 1. FIX: Enforce Padding, Return Mask, and Set Left-Padding for Generation
+    def fixed_tokenize_texts(self, texts: List[str], padding_mode: bool = True) -> Union[List[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+        if not padding_mode:
+            # Original behavior for ref_text (no uniform padding)
+            input_ids = []
+            for text in texts:
+                input = self.processor(text=text, return_tensors="pt", padding=True)
+                input_id = input["input_ids"].to(self.device)
+                input_id = input_id.unsqueeze(0) if input_id.dim() == 1 else input_id
+                input_ids.append(input_id)
+            return input_ids
+        else:
+            # Batched behavior for main text (padding + mask)
+            # CRITICAL: Use Left-Padding for decoder-only generation!
+            if hasattr(self.processor, "tokenizer"):
+                self.processor.tokenizer.padding_side = "left"
+            
+            inputs = self.processor(
+                text=texts,
+                return_tensors="pt",
+                padding="max_length",
                 max_length=1024,
                 truncation=True
             )
-            input_id = input["input_ids"].to(self.device)
-            input_id = input_id.unsqueeze(0) if input_id.dim() == 1 else input_id
-            input_ids.append(input_id)
-        return input_ids
+            return inputs["input_ids"].to(self.device), inputs["attention_mask"].to(self.device)
 
-    # 2. FIX: Sequential Decoding to prevent Masking Crash in Batched Inference
+    # 2. FIX: Sequential Decoding & Mask Handling
     @torch.no_grad()
     def fixed_generate_voice_clone(
         self,
@@ -89,9 +99,9 @@ try:
                 ref_texts_for_ids = None
 
         input_texts = [self._build_assistant_text(t) for t in texts]
-        # This calls our patched _tokenize_texts if bound correctly, or we call it directly?
-        # self._tokenize_texts is bound to the instance, so it should call the patched version if patched on class.
-        input_ids = self._tokenize_texts(input_texts)
+        
+        # Call with padding_mode=True to get masks
+        input_ids, attention_mask = self._tokenize_texts(input_texts, padding_mode=True)
 
         ref_ids = None
         if ref_texts_for_ids is not None:
@@ -100,13 +110,15 @@ try:
                 if rt is None or rt == "":
                     ref_ids.append(None)
                 else:
-                    ref_tok = self._tokenize_texts([self._build_ref_text(rt)])[0]
+                    # Call with padding_mode=False for refs
+                    ref_tok = self._tokenize_texts([self._build_ref_text(rt)], padding_mode=False)[0]
                     ref_ids.append(ref_tok)
 
         gen_kwargs = self._merge_generate_kwargs(**kwargs)
 
         talker_codes_list, _ = self.model.generate(
             input_ids=input_ids,
+            attention_mask=attention_mask,  # PASS MASK!
             ref_ids=ref_ids,
             voice_clone_prompt=voice_clone_prompt_dict,
             languages=languages,
