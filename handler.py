@@ -50,7 +50,7 @@ try:
             )
             return inputs["input_ids"].to(self.device), inputs["attention_mask"].to(self.device)
 
-    # 2. FIX: Sequential Decoding & Mask Handling
+    # 2. FIX: Sequential Decoding & Mask Handling & TRUE Parallel Batching
     @torch.no_grad()
     def fixed_generate_voice_clone(
         self,
@@ -75,6 +75,7 @@ try:
 
         self._validate_languages(languages)
 
+        # Prompt setup
         if voice_clone_prompt is None:
             if ref_audio is None:
                 raise ValueError("Either `voice_clone_prompt` or `ref_audio` must be provided.")
@@ -98,37 +99,71 @@ try:
                 voice_clone_prompt_dict = voice_clone_prompt
                 ref_texts_for_ids = None
 
+        # --- BATCH PREPARATION ---
+        # 1. Main Text: Pad to 1024, stack into (B, Seq), and wrap in List to trick generate() loop
         input_texts = [self._build_assistant_text(t) for t in texts]
+        input_ids_tensor, attention_mask_tensor = self._tokenize_texts(input_texts, padding_mode=True)
         
-        # Call with padding_mode=True to get masks
-        input_ids, attention_mask = self._tokenize_texts(input_texts, padding_mode=True)
+        # Wrapped for generate() loop
+        input_ids_list = [input_ids_tensor]
+        attention_mask_list = [attention_mask_tensor]
 
-        ref_ids = None
+        # 2. Ref Text: Pad to longest in batch, stack, wrapped
+        ref_ids_list = None
         if ref_texts_for_ids is not None:
-            ref_ids = []
-            for i, rt in enumerate(ref_texts_for_ids):
-                if rt is None or rt == "":
-                    ref_ids.append(None)
-                else:
-                    # Call with padding_mode=False for refs
-                    ref_tok = self._tokenize_texts([self._build_ref_text(rt)], padding_mode=False)[0]
-                    ref_ids.append(ref_tok)
+            # We must manually batch ref texts explicitly
+            ref_raw = [self._build_ref_text(rt) if rt else "" for rt in ref_texts_for_ids]
+            # Use processor to pad refs
+            if hasattr(self.processor, "tokenizer"):
+                self.processor.tokenizer.padding_side = "left" # Ensure consistency
+            
+            # Note: Ref text can be short, so dynamic padding is better than 1024
+            ref_inputs = self.processor(
+                text=ref_raw,
+                return_tensors="pt",
+                padding=True, # Dynamic padding to longest in batch
+                truncation=True
+            )
+            # Pass stacked ref IDs as single item in list
+            ref_ids_list = [ref_inputs["input_ids"].to(self.device)]
+        
+        # 3. Languages: Wrap singular language (assume homogeneous batch for now, or rely on broadcasting)
+        # generate() will pick languages[0]. If inputs are (B, S), model sees single language.
+        # This is fine if entire batch is same language.
+        languages_list = [languages[0]]
 
         gen_kwargs = self._merge_generate_kwargs(**kwargs)
 
+        # CALL GENERATE
+        # Since we pass `[BatchTensor]`, the loop runs ONCE.
+        # `input_ids` = BatchTensor(B, S)
+        # Model forward receives full batch.
         talker_codes_list, _ = self.model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,  # PASS MASK!
-            ref_ids=ref_ids,
+            input_ids=input_ids_list,
+            attention_mask=attention_mask_list,
+            ref_ids=ref_ids_list,
             voice_clone_prompt=voice_clone_prompt_dict,
-            languages=languages,
+            languages=languages_list,
             non_streaming_mode=non_streaming_mode,
             **gen_kwargs,
         )
 
+        # UNPACKING
+        # talker_codes_list comes back as [OutputBatchTensor(B, OutS)] because loop ran once.
+        # We need to unpack this BatchTensor into list of codes for sequential decoding.
+        
+        # item 0 is the batch tensor
+        batch_codes = talker_codes_list[0] # (B, OutS)
+        
+        # Split into list of (1, OutS) or (OutS)
+        # generate outputs codes.
+        
         codes_for_decode = []
-        for i, codes in enumerate(talker_codes_list):
-            ref_code_list = voice_clone_prompt_dict.get("ref_code", None)
+        # Access original prompt dict list items for concatenation
+        ref_code_list = voice_clone_prompt_dict.get("ref_code", None)
+        
+        for i in range(batch_codes.shape[0]):
+            codes = batch_codes[i] # (OutS)
             if ref_code_list is not None and ref_code_list[i] is not None:
                 codes_for_decode.append(torch.cat([ref_code_list[i].to(codes.device), codes], dim=0))
             else:
@@ -148,6 +183,7 @@ try:
             ref_code_list = voice_clone_prompt_dict.get("ref_code", None)
             if ref_code_list is not None and ref_code_list[i] is not None:
                 ref_len = int(ref_code_list[i].shape[0])
+                # Note: codes_for_decode[i] includes ref + gen.
                 total_len = int(codes_for_decode[i].shape[0])
                 cut = int(ref_len / max(total_len, 1) * wav.shape[0])
                 wavs_out.append(wav[cut:])
