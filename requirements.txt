@@ -1,6 +1,6 @@
 runpod==1.6.0
 # Note: torch and torchaudio are installed in Dockerfile with CUDA support
-# Note: flash-attn is NOT needed — we use PyTorch native SDPA instead
+# Note: flash-attn installs via wheel in Dockerfile
 numpy<2.0.0
 scipy
 transformers>=4.40.0,<5.0.0

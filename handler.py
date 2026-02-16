@@ -151,7 +151,7 @@ def init_model():
             str(MODEL_NAME_OR_PATH),
             device_map="cuda:0",
             dtype=torch.bfloat16,
-            attn_implementation="sdpa"
+            attn_implementation="flash_attention_2"
         )
 
         if torch.cuda.is_available():

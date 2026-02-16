@@ -27,7 +27,11 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Consolidate pip installs to prevent redundant 1.3GB CUDA re-downloads
+# Pre-install Flash Attention 2 from pre-built wheel (Saves 20+ mins build time)
+# Using v2.6.3 for PyTorch 2.4.0 + CUDA 12.x + Python 3.11
+RUN pip install --no-cache-dir https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+
+# Consolidate pip installs
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
     git+https://github.com/aim0xyz/qwen3-tts_aimoxyz.git \
