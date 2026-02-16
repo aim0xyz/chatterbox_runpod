@@ -127,22 +127,94 @@ try:
             # Pass stacked ref IDs as single item in list
             ref_ids_list = [ref_inputs["input_ids"].to(self.device)]
         
-        # 3. Languages: Wrap singular language (assume homogeneous batch for now, or rely on broadcasting)
-        # generate() will pick languages[0]. If inputs are (B, S), model sees single language.
-        # This is fine if entire batch is same language.
+        # 3. Languages: Wrap singular language
         languages_list = [languages[0]]
+
+        # 4. Prompt Dict: STACK lists into Batch Tensors and Wrap
+        # voice_clone_prompt_dict contains lists [Tensor(1, D), Tensor(1, D)...]
+        # We need to convert to [Tensor(B, D)]
+        gen_prompt_dict = {}
+        for k, v in voice_clone_prompt_dict.items():
+            if isinstance(v, list) and len(v) > 0:
+                if isinstance(v[0], torch.Tensor):
+                    # Check dimensions for stacking
+                    # ref_spk_embedding is (1, D). Stack -> (B, D).
+                    # ref_code might be (1, S, D). Stack -> (B, S, D) IF lengths match.
+                    # If lengths mismatch (ref_code), we must pad!
+                    
+                    shapes = [item.shape for item in v if item is not None]
+                    if not shapes:
+                        gen_prompt_dict[k] = [None] # Handle empty/None
+                        continue
+                        
+                    # Check if all shapes match
+                    ref_shape = shapes[0]
+                    match = all(s == ref_shape for s in shapes)
+                    
+                    if match:
+                        stacked = torch.cat(v, dim=0) # (B, ...)
+                        gen_prompt_dict[k] = [stacked]
+                    else:
+                        # Mismatch (likely ref_code). PAD it.
+                        # Assuming Sequence dimension is dim 1
+                        max_len = max(s[1] for s in shapes)
+                        padded_list = []
+                        for item in v:
+                            if item is None:
+                                # Create dummy? Or fail?
+                                # Usually shouldn't happen if shapes exist
+                                pass 
+                            else:
+                                # item: (1, S, ...)
+                                curr_len = item.shape[1]
+                                if curr_len < max_len:
+                                    # Pad. Qwen codes can take 0? Or repeat?
+                                    # We use 0 padding.
+                                    pad_amt = max_len - curr_len
+                                    # Pad dim 1. (0, 0, 0, pad_amt)
+                                    # shape is (1, S, D) or (1, S)
+                                    # padding tuple is (last_dim_left, last_dim_right, 2nd_last_left, ...)
+                                    # for (1, S, D), we pad S.
+                                    # pad=(0, 0, 0, pad_amt)
+                                    if item.dim() == 3:
+                                         item = torch.nn.functional.pad(item, (0, 0, 0, pad_amt))
+                                    elif item.dim() == 2:
+                                         item = torch.nn.functional.pad(item, (0, pad_amt))
+                                padded_list.append(item)
+                        
+                        if padded_list:
+                            stacked = torch.cat(padded_list, dim=0)
+                            gen_prompt_dict[k] = [stacked]
+                        else:
+                            gen_prompt_dict[k] = [None]
+                else:
+                    # Non-tensor list (e.g. modes). Just use list?
+                    # x_vector_only_mode is list of bools.
+                    # Qwen uses it?
+                    # If generation loop runs once, it gets v[0].
+                    # We can't stack bools.
+                    # But if we pass the LIST, generate gets v[i]. i=0.
+                    # It gets v[0]. (Single bool).
+                    # But we represent a BATCH.
+                    # Does model support list of bools?
+                    # Logic likely uses it for flow control.
+                    # If we perform batch, flow must be same for all!
+                    # We use v[0] for the batch.
+                    gen_prompt_dict[k] = v # Pass original list? No, wrap list?
+                    # If we pass v, generate gets v[0].
+                    # Correct.
+                    gen_prompt_dict[k] = [ v[0] ]
+            else:
+                 gen_prompt_dict[k] = [v] # scalar/none
 
         gen_kwargs = self._merge_generate_kwargs(**kwargs)
 
         # CALL GENERATE
-        # Since we pass `[BatchTensor]`, the loop runs ONCE.
-        # `input_ids` = BatchTensor(B, S)
-        # Model forward receives full batch.
         talker_codes_list, _ = self.model.generate(
             input_ids=input_ids_list,
             attention_mask=attention_mask_list,
             ref_ids=ref_ids_list,
-            voice_clone_prompt=voice_clone_prompt_dict,
+            voice_clone_prompt=gen_prompt_dict, # Use Batched Dict
             languages=languages_list,
             non_streaming_mode=non_streaming_mode,
             **gen_kwargs,
