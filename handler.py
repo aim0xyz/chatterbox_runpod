@@ -150,7 +150,7 @@ def init_model():
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
             device_map="cuda:0",
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2"
         )
 
