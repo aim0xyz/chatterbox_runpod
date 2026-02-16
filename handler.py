@@ -692,6 +692,17 @@ def generate_tts_handler(job):
         # Combine pieces
         final_audio = np.concatenate(all_audio)
         
+        # --- SAFETY TRUNCATION ---
+        # Prevent runaway generation from causing 400 Bad Request (Payload too large)
+        # If audio is > 5 minutes, something is wrong with the model (loops).
+        max_duration = 300.0 # 5 minutes
+        current_duration = len(final_audio) / sr
+        if current_duration > max_duration:
+             print(f"[TTS] ⚠️  WARNING: Audio duration {current_duration:.2f}s exceeds limit {max_duration}s. Truncating.")
+             # Cut to limit
+             final_audio = final_audio[:int(max_duration * sr)]
+             current_duration = max_duration
+        
         # --- LOUDNESS NORMALIZATION ---
         # Normalize the final audio to a consistent volume level (-14 dBFS)
         # This fixes the "audio is too quiet" issue
