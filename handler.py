@@ -79,8 +79,10 @@ def ensure_turbo_activated():
         # 2. NITRO COMPILATION
         # We only compile the main backbone. It's stable and fast.
         if hasattr(model.model, "talker"):
-            print("[Turbo] 🏗️  Pre-compiling Talker Layers (Nitro)...")
-            model.model.talker = torch.compile(model.model.talker, mode="reduce-overhead", dynamic=False)
+            print("[Turbo] 🏗️  Pre-compiling Talker Layers (Nitro - Max Autotune)...")
+            # Use max-autotune for best Triton kernel performance with dynamic shapes
+            # reduce-overhead often fails with dynamic KV cache growth
+            model.model.talker = torch.compile(model.model.talker, mode="max-autotune")
 
         # 3. WARMUP (Master Bake)
         print("[Turbo] ⏳ Baking Master-Bucket (Full Generate)... Expect ~5 min hang here (ONCE EVER)...")
@@ -150,13 +152,15 @@ def init_model():
         # Explicitly load config to set torch_dtype for Flash Attention 2
         # This avoids "torch_dtype is deprecated" warning and ensures FA2 works
         config = Qwen3TTSConfig.from_pretrained(str(MODEL_NAME_OR_PATH))
-        config.torch_dtype = torch.bfloat16
-        config.attn_implementation = "flash_attention_2"
-
+        
+        # Pass dtype and attn_implementation directly to from_pretrained
+        # This is the modern, correct way to initialize
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
             config=config,
             device_map="cuda:0",
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2"
         )
 
         if torch.cuda.is_available():
@@ -478,6 +482,7 @@ def get_pause_duration_after_chunk(chunk_text, sr):
 # ==========================================
 def generate_tts_handler(job):
     """Handle text-to-speech request with smart chunking."""
+    ensure_turbo_activated()
     inp = job["input"]
     text = inp.get("text")
     lang_code = inp.get("language", "en") # 'en', 'de', etc.
