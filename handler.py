@@ -139,7 +139,7 @@ def init_model():
             logging.getLogger("qwen_tts.core.models.configuration_qwen3_tts").setLevel(logging.ERROR)
         except: pass
         
-        from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSTalkerConfig, Qwen3TTSTalkerCodePredictorConfig
+        from qwen_tts.core.models.configuration_qwen3_tts import Qwen3TTSTalkerConfig, Qwen3TTSTalkerCodePredictorConfig, Qwen3TTSConfig
         _old_talker_init = Qwen3TTSTalkerConfig.__init__
         def _patched_talker_init(self, *args, **kwargs):
             if "code_predictor_config" not in kwargs or kwargs["code_predictor_config"] is None:
@@ -147,11 +147,16 @@ def init_model():
             return _old_talker_init(self, *args, **kwargs)
         Qwen3TTSTalkerConfig.__init__ = _patched_talker_init
 
+        # Explicitly load config to set torch_dtype for Flash Attention 2
+        # This avoids "torch_dtype is deprecated" warning and ensures FA2 works
+        config = Qwen3TTSConfig.from_pretrained(str(MODEL_NAME_OR_PATH))
+        config.torch_dtype = torch.bfloat16
+        config.attn_implementation = "flash_attention_2"
+
         model = Qwen3TTSModel.from_pretrained(
             str(MODEL_NAME_OR_PATH),
+            config=config,
             device_map="cuda:0",
-            torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2"
         )
 
         if torch.cuda.is_available():
