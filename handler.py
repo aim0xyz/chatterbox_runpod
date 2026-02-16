@@ -629,39 +629,18 @@ def generate_tts_handler(job):
         print(f"[PROFILER] 🔍 DEEP PERFORMANCE ANALYSIS")
         print(f"{'='*60}\n")
 
-        for i, chunk in enumerate(text_chunks):
-            # Log progress for UI
-            progress_pct = int((i / len(text_chunks)) * 90)
-            log_progress("generate", progress_pct, f"Storyteller speaking (Chunk {i+1}/{len(text_chunks)})...")
+            # BATCH GENERATION: Process all chunks in parallel for 100+ tokens/s throughput!
+            limit = 1024
+            print(f"[TTS] 🚀 Starting BATCH processing of {len(text_chunks)} chunks...")
             
-            print(f"\n[PROFILER] --- Chunk {i+1}/{len(text_chunks)} ---")
-            print(f"[PROFILER] Text: '{chunk[:80]}...' ({len(chunk)} chars)")
-            
-            chunk_start = time.time()
-            # Fixed-Bucket Padding: We round the limit up to 1024 
-            # so the engine ONLY sees the pre-baked static shape.
-            # This prevents 4-minute hangs during the story.
-            limit = 1024 
-            print(f"[PROFILER] Bucket-Stabilized Token limit: {limit}")
-            
-            # Sync GPU before timing
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            
-            t0 = time.time()
-            print(f"[PROFILER] ⏱️  Starting generation in 1024-token bucket at t={0:.2f}s...")
-            
-            # Generate this specific chunk
-            # Use cached voice prompt if available, otherwise fall back
             gen_kwargs = dict(
-                text=chunk,
+                text=text_chunks,   # Pass list of strings for batching
                 language=language,
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
                 top_k=top_k,
                 max_new_tokens=limit,
-                # Subtalker settings for consistent voice across ALL chunks
                 subtalker_dosample=True,
                 subtalker_temperature=subtalker_temperature,
                 subtalker_top_k=subtalker_top_k,
@@ -676,44 +655,31 @@ def generate_tts_handler(job):
                 gen_kwargs["ref_text"] = None
                 gen_kwargs["x_vector_only_mode"] = True
             
-            # Generate this specific chunk with Turbo Speed
-            with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
-            
-            # Sync GPU after generation
+            # Sync GPU
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             
-            t1 = time.time()
-            gen_time = t1 - t0
+            t0 = time.time()
             
-            chunk_time = time.time() - chunk_start
-            audio_duration = len(wavs[0]) / sample_rate
-            
-            print(f"[PROFILER] ✅ Generation complete at t={chunk_time:.2f}s")
-            print(f"[PROFILER] 📊 Breakdown:")
-            print(f"[PROFILER]   - Pure generation: {gen_time:.2f}s")
-            print(f"[PROFILER]   - Audio output: {audio_duration:.2f}s")
-            print(f"[PROFILER]   - Real-time ratio: {audio_duration/gen_time:.2f}x")
-            print(f"[PROFILER]   - Tokens/sec: {round(limit/gen_time, 1)}")
+            # Single Batched Call
+            with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
             
             if torch.cuda.is_available():
-                mem_allocated = torch.cuda.memory_allocated() / 1024**3
-                mem_reserved = torch.cuda.memory_reserved() / 1024**3
-                print(f"[PROFILER]   - GPU Memory: {mem_allocated:.2f}GB allocated, {mem_reserved:.2f}GB reserved")
+                torch.cuda.synchronize()
+                
+            batch_time = time.time() - t0
+            print(f"[PROFILER] 🚀 Batch Generation Complete in {batch_time:.2f}s")
             
-            print(f"[PROFILER] Total chunk time: {chunk_time:.2f}s\n")
-            
+            # Process results (add pauses)
             sr = sample_rate
-            all_audio.append(wavs[0])
-            
-            # Add variable silence based on how the chunk ends
-            # (paragraph break > sentence end > clause boundary)
-            if i < len(text_chunks) - 1:  # No trailing silence after last chunk
-                pause = get_pause_duration_after_chunk(chunk, sr)
-                all_audio.append(pause)
-                pause_ms = int(len(pause) / sr * 1000)
-                print(f"[TTS] 🔇 Added {pause_ms}ms pause after chunk {i+1}")
+            for i, (wav, chunk_text) in enumerate(zip(wavs, text_chunks)):
+                all_audio.append(wav)
+                
+                # Add variable silence
+                if i < len(text_chunks) - 1:
+                    pause = get_pause_duration_after_chunk(chunk_text, sr)
+                    all_audio.append(pause)
             
         # Combine pieces
         final_audio = np.concatenate(all_audio)
