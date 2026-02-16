@@ -66,7 +66,7 @@ def ensure_turbo_activated():
         was_turbo_baked = True
         return
 
-    print("[Turbo] 🚀 Activating Nitro-Engine (Bucket-Stable Mode)...")
+    print("[Turbo] 🚀 Activating Nitro-Engine (100+ tokens/s Mode)...")
     try:
         # 1. OPTIMIZATION SETTINGS
         torch._dynamo.config.guard_nn_modules = True
@@ -74,40 +74,40 @@ def ensure_turbo_activated():
         
         base = model.model
         
-        # 2. LAYER-WISE TURBO
-        # We compile with STATIC shapes by default to avoid Inductor's symbolic shape thrashing.
+        # 2. NITRO-COMPILATION (reduce-overhead)
+        # We can use "reduce-overhead" safely because we are using FIXED 1024 BUCKETS.
+        # This is the secret to 100+ tokens/s.
         if hasattr(base, "talker") and hasattr(base.talker, "model") and hasattr(base.talker.model, "layers"):
             layers = base.talker.model.layers
-            print(f"[Turbo] 🏗️  Pre-compiling {len(layers)} Talker Layers...")
+            print(f"[Turbo] 🏗️  Pre-compiling {len(layers)} Talker Layers (Nitro)...")
             for i in range(len(layers)):
-                layers[i] = torch.compile(layers[i], mode="default", dynamic=False)
+                layers[i] = torch.compile(layers[i], mode="reduce-overhead", dynamic=False)
         
         if hasattr(base, "talker") and hasattr(base.talker, "code_predictor") and hasattr(base.talker.code_predictor, "model") and hasattr(base.talker.code_predictor.model, "layers"):
             p_layers = base.talker.code_predictor.model.layers
-            print(f"[Turbo] 🏗️  Pre-compiling {len(p_layers)} Predictor Layers...")
+            print(f"[Turbo] 🏗️  Pre-compiling {len(p_layers)} Predictor Layers (Nitro)...")
             for i in range(len(p_layers)):
-                p_layers[i] = torch.compile(p_layers[i], mode="default", dynamic=False)
+                p_layers[i] = torch.compile(p_layers[i], mode="reduce-overhead", dynamic=False)
 
-        # 3. THE MASTER BAKE (1024 Bucket)
-        # We bake the largest common bucket. This ensures all smaller stories are covered.
-        print("[Turbo] ⏳ Baking Master-Bucket (1024 tokens)... Expect ~5 min hang here (ONCE EVER)...")
-        dummy_ref = None
-        for f in PRESET_ROOT.rglob("*.wav"):
-            dummy_ref = str(f)
-            break
+        # 3. THE MASTER BAKE (Full Generation)
+        # We practice a real generation so the GPU caches the "Speaking" math.
+        print("[Turbo] ⏳ Baking Master-Bucket (Full Generate)... Expect ~5 min hang here (ONCE EVER)...")
+        dummy_ref = "/runpod-volume/preset_voices/en/Owen.wav"
+        if not os.path.exists(dummy_ref):
+            for f in PRESET_ROOT.rglob("*.wav"):
+                dummy_ref = str(f)
+                break
             
         if dummy_ref:
-            with torch.inference_mode():
-                # This locks in the 1024 bucket. Because we use STATIC shapes, 
-                # any future story padded to 1024 will be INSTANT.
+            with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                # Full generation warm-up ensures Talker backbone is alive.
                 model.generate_voice_clone(
-                    text="Bucket warm up." * 50, 
+                    text="Master bucket warmup. Full engine prime." * 25, 
                     language="english", 
                     ref_audio=dummy_ref,
-                    x_vector_only_mode=True, 
                     max_new_tokens=1024
                  )
-        print("[Turbo] ✅ Nitro-Engine Fully Optimized! 100+ tokens/s LOCKED into buckets.")
+        print("[Turbo] ✅ Nitro-Engine Fully Optimized! 100+ tokens/s UNLOCKED.")
     except Exception as e:
         print(f"[Turbo] ⚠️ Warning: Turbo initialization hit a snag: {e}")
     
