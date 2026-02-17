@@ -372,21 +372,30 @@ def normalize_reference_audio(voice_path, sr=24000):
         audio_np = waveform.squeeze().numpy()
         
         rms = float(np.sqrt(np.mean(audio_np ** 2)))
-        if rms < 0.15:  # Higher threshold to ensure robust reference
-            print(f"[ref_norm] 🔇 Reference audio is quiet (RMS={rms:.4f}), normalizing...")
-            target_rms = 0.20  # Stronger level for reference to encourage loud output
-            gain = min(target_rms / max(rms, 1e-8), 12.0) # More headroom for quiet clips
-            audio_np = np.clip(audio_np * gain, -0.999, 0.999).astype(np.float32)
+        target_rms = 0.20  # Standard target for clear voice reference
+        
+        # Always normalize if it's too quiet OR too loud (e.g. RMS < 0.18 or > 0.22)
+        # This ensures CONSISTENT volume for all voices
+        if abs(rms - target_rms) > 0.02: 
+            print(f"[ref_norm] � Normalizing reference (current RMS={rms:.4f} → target {target_rms})")
+            
+            # Calculate gain but cap it to avoid noise explosion on silent clips
+            gain = target_rms / max(rms, 1e-8)
+            gain = min(gain, 15.0) 
+            
+            # Apply gain and STRICTLY CLIP to prevent the "Min value < -1.0" warning
+            audio_np = audio_np * gain
+            audio_np = np.clip(audio_np, -0.99, 0.99).astype(np.float32)
             
             # Save normalized reference
             import torch
             normalized_waveform = torch.from_numpy(audio_np).unsqueeze(0)
             temp_path = "/tmp/normalized_ref.wav"
             torchaudio.save(temp_path, normalized_waveform, sample_rate_ref)
-            print(f"[ref_norm] ✅ Reference normalized (gain={gain:.2f}x)")
+            print(f"[ref_norm] ✅ Reference normalized & clipped (gain={gain:.2f}x)")
             return temp_path
         else:
-            print(f"[ref_norm] ✅ Reference audio level OK (RMS={rms:.4f})")
+            print(f"[ref_norm] ✅ Reference audio level perfect (RMS={rms:.4f})")
             return str(voice_path)
     except Exception as e:
         print(f"[ref_norm] ⚠️  Reference normalization skipped: {e}")
@@ -702,8 +711,8 @@ def generate_tts_handler(job):
         
         # --- SAFETY TRUNCATION ---
         # Prevent runaway generation from causing 400 Bad Request (Payload too large)
-        # If audio is > 5 minutes, something is wrong with the model (loops).
-        max_duration = 300.0 # 5 minutes
+        # If audio is > 10 minutes, something is wrong with the model (loops).
+        max_duration = 600.0 # 10 minutes
         current_duration = len(final_audio) / sr
         if current_duration > max_duration:
              print(f"[TTS] ⚠️  WARNING: Audio duration {current_duration:.2f}s exceeds limit {max_duration}s. Truncating.")
