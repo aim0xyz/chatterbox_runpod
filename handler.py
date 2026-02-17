@@ -646,7 +646,8 @@ def generate_tts_handler(job):
         print(f"[PROFILER] 🔍 DEEP PERFORMANCE ANALYSIS")
         print(f"{'='*60}\n")
 
-        # BATCH GENERATION: Process all chunks in parallel for 100+ tokens/s throughput!
+        # BATCH GENERATION: Process all chunks in parallel for maximum speed.
+        # Per-chunk normalization + crossfading smooths out any tone differences.
         limit = 1024
         print(f"[TTS] 🚀 Starting BATCH processing of {len(text_chunks)} chunks...")
         
@@ -678,12 +679,11 @@ def generate_tts_handler(job):
         
         t0 = time.time()
         
-        # Single Batched Call
-        # Set fixed seed for consistent tone across chunks
+        # Set fixed seed for best-effort consistency across batched chunks
         torch.manual_seed(42)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(42)
-            
+        
         with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
             wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
         
@@ -693,21 +693,50 @@ def generate_tts_handler(job):
         batch_time = time.time() - t0
         print(f"[PROFILER] 🚀 Batch Generation Complete in {batch_time:.2f}s")
         
-        # Process results (add pauses)
+        # Process results: normalize each chunk + crossfade for seamless transitions
         sr = sample_rate
-        for i, (wav, chunk_text) in enumerate(zip(wavs, text_chunks)):
-            # Normalize chunk individually to ensure consistent loudness
-            # This fixes the "quiet/loud" variance issue between sentences
+        CROSSFADE_MS = 40  # 40ms crossfade between chunks (sounds natural)
+        crossfade_samples = int(CROSSFADE_MS / 1000.0 * sr)
+        
+        # Normalize all chunks individually first
+        normalized_wavs = []
+        for wav in wavs:
             wav = normalize_audio_loudness(wav, sr, target_dbfs=-14.0)
-            all_audio.append(wav)
+            normalized_wavs.append(wav)
+        
+        # Stitch chunks together with crossfade + pauses
+        final_parts = [all_audio[0]]  # leading silence already added
+        
+        for i, (wav, chunk_text) in enumerate(zip(normalized_wavs, text_chunks)):
+            if i == 0:
+                final_parts.append(wav)
+            else:
+                # Crossfade: blend the end of previous chunk with start of current chunk
+                prev = final_parts[-1]
+                xf = min(crossfade_samples, len(prev), len(wav))
+                
+                if xf > 0:
+                    # Create linear fade curves
+                    fade_out = np.linspace(1.0, 0.0, xf).astype(np.float32)
+                    fade_in = np.linspace(0.0, 1.0, xf).astype(np.float32)
+                    
+                    # Blend the overlap region
+                    blended = prev[-xf:] * fade_out + wav[:xf] * fade_in
+                    
+                    # Replace end of previous with the blended part
+                    final_parts[-1] = prev[:-xf]
+                    final_parts.append(blended)
+                    final_parts.append(wav[xf:])
+                else:
+                    final_parts.append(wav)
             
-            # Add variable silence
+            # Add pause between chunks (but not after the last one)
             if i < len(text_chunks) - 1:
                 pause = get_pause_duration_after_chunk(chunk_text, sr)
-                all_audio.append(pause)
-            
-        # Combine pieces
-        final_audio = np.concatenate(all_audio)
+                final_parts.append(pause)
+        
+        # Combine all pieces
+        final_audio = np.concatenate(final_parts)
         
         # --- SAFETY TRUNCATION ---
         # Prevent runaway generation from causing 400 Bad Request (Payload too large)
