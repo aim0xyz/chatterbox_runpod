@@ -517,16 +517,16 @@ def generate_tts_handler(job):
     
     # --- VOICE SETTINGS ---
     # Tuned for expressive, engaging storytelling:
-    #   - Temperature 0.75 → adds just enough "acting" and pitch variety
+    #   - Temperature 0.80 → adds more "acting" and pitch variety (Exciting Mode)
     #   - Top_p 0.95 → allows for a richer range of natural inflections
-    #   - Repetition_penalty 1.05 → keeps it stable without being robotic
-    temperature = float(inp.get("temperature", 0.75)) 
+    #   - Repetition_penalty 1.02 → keeps it natural and flowing (less robotic constraint)
+    temperature = float(inp.get("temperature", 0.80)) 
     top_p = float(inp.get("top_p", 0.95))             
-    repetition_penalty = float(inp.get("repetition_penalty", 1.05)) 
+    repetition_penalty = float(inp.get("repetition_penalty", 1.02)) 
     top_k = int(inp.get("top_k", 50))
     
     # Subtalker (acoustic code predictor) settings — tuned for energy!
-    subtalker_temperature = float(inp.get("subtalker_temperature", 0.75))
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.80))
     subtalker_top_k = int(inp.get("subtalker_top_k", 50))
     subtalker_top_p = float(inp.get("subtalker_top_p", 0.95))
     subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
@@ -670,6 +670,11 @@ def generate_tts_handler(job):
         t0 = time.time()
         
         # Single Batched Call
+        # Set fixed seed for consistent tone across chunks
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
+            
         with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
             wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
         
@@ -682,6 +687,9 @@ def generate_tts_handler(job):
         # Process results (add pauses)
         sr = sample_rate
         for i, (wav, chunk_text) in enumerate(zip(wavs, text_chunks)):
+            # Normalize chunk individually to ensure consistent loudness
+            # This fixes the "quiet/loud" variance issue between sentences
+            wav = normalize_audio_loudness(wav, sr, target_dbfs=-14.0)
             all_audio.append(wav)
             
             # Add variable silence
@@ -705,7 +713,7 @@ def generate_tts_handler(job):
         
         # --- LOUDNESS NORMALIZATION ---
         # Normalize the final audio to a consistent volume level (-14 dBFS)
-        # This fixes the "audio is too quiet" issue
+        # This fixes the "audio is too quiet" issue (global check)
         print(f"[TTS] 🔊 Normalizing final audio loudness...")
         final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-14.0)
         
@@ -720,7 +728,8 @@ def generate_tts_handler(job):
         
         audio_segment = AudioSegment.from_wav(wav_io)
         mp3_io = io.BytesIO()
-        audio_segment.export(mp3_io, format="mp3", bitrate="192k")
+        # Reduced bitrate to 128k to fit within API payload limits for long stories (prevents timeout)
+        audio_segment.export(mp3_io, format="mp3", bitrate="128k")
         b64_audio = base64.b64encode(mp3_io.getvalue()).decode('utf-8')
         
         total_time = time.time() - start_time
