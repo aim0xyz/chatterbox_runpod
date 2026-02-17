@@ -525,19 +525,23 @@ def generate_tts_handler(job):
     print(f"[TTS] Initializing generation for: {text[:50]}...")
     
     # --- VOICE SETTINGS ---
-    # Tuned for expressive, engaging storytelling:
-    #   - Temperature 0.80 → adds more "acting" and pitch variety (Exciting Mode)
-    #   - Top_p 0.95 → allows for a richer range of natural inflections
-    #   - Repetition_penalty 1.02 → keeps it natural and flowing (less robotic constraint)
+    # Main Talker: Controls WHAT is said (prosody, word-level expression)
+    #   - Temperature 0.80 → expressive storytelling with good pitch variety
+    #   - Top_p 0.90 → rich but slightly constrained inflections
+    #   - Repetition_penalty 1.02 → keeps it natural and flowing
     temperature = float(inp.get("temperature", 0.80)) 
-    top_p = float(inp.get("top_p", 0.95))             
+    top_p = float(inp.get("top_p", 0.90))             
     repetition_penalty = float(inp.get("repetition_penalty", 1.02)) 
     top_k = int(inp.get("top_k", 50))
     
-    # Subtalker (acoustic code predictor) settings — tuned for energy!
-    subtalker_temperature = float(inp.get("subtalker_temperature", 0.80))
-    subtalker_top_k = int(inp.get("subtalker_top_k", 50))
-    subtalker_top_p = float(inp.get("subtalker_top_p", 0.95))
+    # Subtalker (acoustic code predictor): Controls HOW it sounds (pitch, tone, energy)
+    # CONSISTENCY FIX: Keep subtalker LOW randomness so every chunk has the same
+    # vocal timbre, pitch range, and energy level. The main talker still handles
+    # expressiveness (word stress, intonation patterns), but the "voice quality"
+    # stays locked across chunks.
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.30))
+    subtalker_top_k = int(inp.get("subtalker_top_k", 20))
+    subtalker_top_p = float(inp.get("subtalker_top_p", 0.80))
     subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
     
     if not text:
@@ -577,7 +581,8 @@ def generate_tts_handler(job):
     print(f"[TTS] 📝 Preprocessed text ({len(text)} chars): '{text[:100]}...'")
     
     # --- THE STITCHER: SMART NATURAL CHUNKING ---
-    text_chunks = split_into_natural_chunks(text, max_chars=280)
+    # Larger chunks = fewer stitching points = more consistent audio
+    text_chunks = split_into_natural_chunks(text, max_chars=400)
     
     print(f"\n{'='*60}")
     print(f"[TTS] 🎙️  STARTING CHUNKED GENERATION")
@@ -650,6 +655,7 @@ def generate_tts_handler(job):
         # Per-chunk normalization + crossfading smooths out any tone differences.
         limit = 1024
         print(f"[TTS] 🚀 Starting BATCH processing of {len(text_chunks)} chunks...")
+        print(f"[TTS] 🔧 Consistency settings: subtalker_temp={subtalker_temperature}, subtalker_top_k={subtalker_top_k}, subtalker_top_p={subtalker_top_p}")
         
         gen_kwargs = dict(
             text=text_chunks,   # Pass list of strings for batching
@@ -664,6 +670,9 @@ def generate_tts_handler(job):
             subtalker_top_k=subtalker_top_k,
             subtalker_top_p=subtalker_top_p,
             subtalker_repetition_penalty=subtalker_repetition_penalty,
+            # CONSISTENCY FIX: non_streaming_mode gives the model full text context
+            # before generating audio, resulting in more consistent prosody across chunks
+            non_streaming_mode=True,
         )
         
         if voice_clone_prompt is not None:
