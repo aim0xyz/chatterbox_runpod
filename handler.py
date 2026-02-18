@@ -751,12 +751,23 @@ def generate_tts_handler(job):
         # We add 40% safety margin for natural pauses and expressiveness.
         max_chunk_chars = max(len(c) for c in text_chunks)
         limit = min(max(int(max_chunk_chars * 0.9 * 1.4), 200), 512)
+        
+        # SORT BY LENGTH: Minimizes left-padding disparity in the batch.
+        # Without this, a 100-char chunk padded to 400 chars gets shifted
+        # positional encodings that alter voice timbre and expressiveness.
+        # We sort before generation and un-sort after to preserve original order.
+        sort_indices = sorted(range(len(text_chunks)), key=lambda i: len(text_chunks[i]))
+        unsort_indices = [0] * len(sort_indices)
+        for new_pos, old_pos in enumerate(sort_indices):
+            unsort_indices[old_pos] = new_pos
+        sorted_chunks = [text_chunks[i] for i in sort_indices]
+        
         print(f"[TTS] 🚀 Starting BATCH processing of {len(text_chunks)} chunks...")
         print(f"[TTS] 📊 Dynamic token limit: {limit} (based on longest chunk: {max_chunk_chars} chars)")
         print(f"[TTS] 🔧 Consistency settings: subtalker_temp={subtalker_temperature}, subtalker_top_k={subtalker_top_k}, subtalker_top_p={subtalker_top_p}")
         
         gen_kwargs = dict(
-            text=text_chunks,   # Pass list of strings for batching
+            text=sorted_chunks,   # Sorted by length for minimal padding disparity
             language=language,
             temperature=temperature,
             top_p=top_p,
@@ -800,14 +811,36 @@ def generate_tts_handler(job):
         batch_time = time.time() - t0
         print(f"[PROFILER] 🚀 Batch Generation Complete in {batch_time:.2f}s")
         
+        # Un-sort wavs back to original chunk order
+        wavs_unsorted = [None] * len(wavs)
+        for sorted_pos, wav in enumerate(wavs):
+            original_pos = sort_indices[sorted_pos]
+            wavs_unsorted[original_pos] = wav
+        wavs = wavs_unsorted
+        
         # Process results: normalize each chunk + crossfade for seamless transitions
         sr = sample_rate
         CROSSFADE_MS = 40  # 40ms crossfade between chunks (sounds natural)
         crossfade_samples = int(CROSSFADE_MS / 1000.0 * sr)
         
-        # Trim internal silence + normalize all chunks individually
+        # Per-chunk post-processing: duration cap + silence trim + normalize
         normalized_wavs = []
-        for idx, wav in enumerate(wavs):
+        for idx, (wav, chunk_text) in enumerate(zip(wavs, text_chunks)):
+            # DURATION CAP: Truncate garbage audio at end of chunk.
+            # The model sometimes generates noise/artifacts past the end of
+            # meaningful speech ("farting" sounds). These have energy so the
+            # silence trimmer can't catch them. We cap based on expected speech
+            # duration: ~85ms per character + 50% margin for natural pauses.
+            max_expected_sec = max(len(chunk_text) * 0.085 * 1.5, 3.0)  # at least 3s
+            max_samples = int(max_expected_sec * sr)
+            if len(wav) > max_samples:
+                trimmed_sec = (len(wav) - max_samples) / sr
+                print(f"[duration_cap] ✂️  Chunk {idx}: trimmed {trimmed_sec:.1f}s of excess audio (text: {len(chunk_text)} chars, max: {max_expected_sec:.1f}s)")
+                # Apply a short fade-out (50ms) before truncating to avoid clicks
+                fade_samples = min(int(0.05 * sr), max_samples)
+                wav = wav[:max_samples].copy()
+                wav[-fade_samples:] *= np.linspace(1.0, 0.0, fade_samples).astype(np.float32)
+            
             # Trim excessively long silences WITHIN each chunk
             # (model sometimes generates 1-2s gaps between sentences)
             wav = trim_internal_silence(wav, sr, max_silence_sec=0.35)
