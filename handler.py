@@ -347,6 +347,80 @@ def preprocess_text_for_natural_speech(text):
     return text.strip()
 
 
+def match_spectral_envelope(wavs, sr):
+    """Match the spectral envelope of all chunks to the first chunk.
+    
+    Each chunk may have slightly different 'room tone' or frequency balance
+    due to random sampling in the subtalker. This function applies a gentle
+    spectral transfer so all chunks share the same frequency profile as
+    the first chunk — making them sound like the same recording session.
+    
+    Uses a smoothed spectral ratio approach (like professional audio mastering)
+    with soft clamping to avoid artifacts.
+    """
+    if len(wavs) < 2:
+        return wavs
+    
+    from scipy.signal import welch
+    from scipy.interpolate import interp1d
+    
+    def get_spectral_envelope(audio, sr):
+        """Get smoothed spectral envelope using Welch's method."""
+        nperseg = min(2048, len(audio) // 2)
+        if nperseg < 256:
+            return None, None
+        freqs, psd = welch(audio, fs=sr, nperseg=nperseg)
+        # Smooth to get envelope (not fine detail)
+        from scipy.ndimage import uniform_filter1d
+        smoothed = uniform_filter1d(psd, size=max(5, len(psd) // 20))
+        return freqs, smoothed
+    
+    # Get reference spectrum from the first chunk
+    ref_freqs, ref_spectrum = get_spectral_envelope(wavs[0], sr)
+    if ref_freqs is None:
+        return wavs
+    
+    matched = [wavs[0]]  # First chunk is the reference
+    
+    for i, wav in enumerate(wavs[1:], 1):
+        try:
+            chunk_freqs, chunk_spectrum = get_spectral_envelope(wav, sr)
+            if chunk_freqs is None:
+                matched.append(wav)
+                continue
+            
+            # Compute spectral ratio (how much to adjust each frequency band)
+            # Avoid division by zero
+            ratio = np.sqrt((ref_spectrum + 1e-10) / (chunk_spectrum + 1e-10))
+            
+            # Soft-clamp ratio to avoid extreme adjustments (max ±3dB per band)
+            ratio = np.clip(ratio, 0.7, 1.4)
+            
+            # Apply the spectral correction via FFT
+            fft = np.fft.rfft(wav)
+            fft_freqs = np.fft.rfftfreq(len(wav), 1.0 / sr)
+            
+            # Interpolate the ratio to match FFT frequency bins
+            ratio_interp = interp1d(
+                chunk_freqs, ratio, 
+                kind='linear', 
+                bounds_error=False, 
+                fill_value=1.0
+            )(fft_freqs)
+            
+            # Apply correction
+            fft_corrected = fft * ratio_interp
+            wav_corrected = np.fft.irfft(fft_corrected, n=len(wav)).astype(np.float32)
+            
+            matched.append(wav_corrected)
+            print(f"[spectral_match] 🎛️  Chunk {i}: matched to reference (ratio range: {ratio.min():.2f}-{ratio.max():.2f})")
+        except Exception as e:
+            print(f"[spectral_match] ⚠️  Chunk {i}: skipped ({e})")
+            matched.append(wav)
+    
+    return matched
+
+
 def normalize_audio_loudness(audio, sr, target_dbfs=-14.0):
     """Normalize audio loudness using RMS-based gain.
     
@@ -655,14 +729,17 @@ def generate_tts_handler(job):
     top_k = int(inp.get("top_k", 50))
     
     # Subtalker (acoustic code predictor): Controls HOW it sounds (pitch, tone, energy)
-    # Moderate warmth: consistent voice quality with natural-sounding variation.
-    #   - Temperature 0.35 → consistent timbre across chunks, not robotic
-    #   - Top_k 20 → focused acoustic palette for voice stability
-    #   - Top_p 0.80 → natural but controlled
+    # NEAR-DETERMINISTIC: Forces consistent "recording quality" across all chunks.
+    # The subtalker controls room tone, breathiness, mic proximity, tonal warmth.
+    # With sampling, each chunk sounds like a different recording session.
+    # By making it near-deterministic, all chunks sound like the SAME recording.
+    #   - Temperature 0.2 → very tight acoustic consistency
+    #   - Top_k 5 → extremely focused acoustic palette
+    #   - Top_p 0.50 → only the most likely acoustic tokens
     #   - Repetition_penalty 1.05 → prevents monotone droning
-    subtalker_temperature = float(inp.get("subtalker_temperature", 0.35))
-    subtalker_top_k = int(inp.get("subtalker_top_k", 20))
-    subtalker_top_p = float(inp.get("subtalker_top_p", 0.80))
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.2))
+    subtalker_top_k = int(inp.get("subtalker_top_k", 5))
+    subtalker_top_p = float(inp.get("subtalker_top_p", 0.50))
     subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
     
     if not text:
@@ -888,6 +965,16 @@ def generate_tts_handler(job):
             rate = char_count / duration if duration > 0 else 0
             print(f"[chunk {idx}] 📊 {duration:.1f}s | {rate:.1f} chars/sec | {len(text_chunks[idx])} chars")
             normalized_wavs.append(wav)
+        
+        # SPECTRAL MATCHING: Make all chunks sound like the same recording session.
+        # Even with consistent voice DNA, each chunk may have slightly different
+        # room tone / frequency balance due to subtalker sampling. This gently
+        # matches each chunk's spectral envelope to the first chunk's.
+        try:
+            normalized_wavs = match_spectral_envelope(normalized_wavs, sr)
+            print(f"[TTS] 🎛️  Spectral matching complete — all chunks matched to reference")
+        except Exception as e:
+            print(f"[TTS] ⚠️  Spectral matching skipped: {e}")
         
         # Stitch chunks together with crossfade + pauses
         final_parts = [all_audio[0]]  # leading silence already added
