@@ -7,7 +7,6 @@ transformers>=4.40.0,<5.0.0
 accelerate
 huggingface_hub
 soundfile
-librosa
 pydub
 
 cryptography

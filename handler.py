@@ -9,7 +9,6 @@ import json
 import io
 import time
 import re
-import librosa
 import soundfile as sf
 import numpy as np
 from pathlib import Path
@@ -292,18 +291,23 @@ def decrypt_voice(encrypted_base64, key_base64):
 # TEXT PREPROCESSING FOR NATURAL SPEECH
 # ==========================================
 def preprocess_text_for_natural_speech(text):
-    """Preprocess text to produce more natural-sounding, well-paced speech.
+    """Preprocess text for calm, naturally-paced children's storytelling.
     
-    This normalizes punctuation, ensures proper spacing, and adds subtle
-    textual cues that guide the TTS model toward natural pauses and pacing.
+    The TTS model uses punctuation as pacing cues — commas create short pauses,
+    periods create longer pauses, and ellipses create dramatic breathing pauses.
+    By strategically adding these cues, we guide the model to speak at a calm,
+    unhurried pace WITHOUT any post-processing audio warping.
+    
+    This is the RIGHT way to control speech pace: at the text level, so the
+    model naturally generates slower, more deliberate speech.
     """
     import re
     
     # 1. Normalize Unicode quotes and dashes to ASCII
     text = text.replace('\u201c', '"').replace('\u201d', '"')  # smart double quotes
     text = text.replace('\u2018', "'").replace('\u2019', "'")  # smart single quotes
-    text = text.replace('\u2014', ' - ')   # em-dash → spaced hyphen (natural pause)
-    text = text.replace('\u2013', ' - ')   # en-dash → spaced hyphen
+    text = text.replace('\u2014', ' — ')   # em-dash → keep as pause marker
+    text = text.replace('\u2013', ' — ')   # en-dash → same
     text = text.replace('\u2026', '...')    # ellipsis character → three dots
     
     # 2. Ensure there is always a space after sentence-ending punctuation
@@ -311,15 +315,33 @@ def preprocess_text_for_natural_speech(text):
     text = re.sub(r'([.!?])([A-Z])', r'\1 \2', text)
     
     # 3. Normalize multiple spaces / newlines into clean boundaries
-    #    - Preserve paragraph breaks (double newline) as a marker
     text = re.sub(r'\n\s*\n', '\n\n', text)   # normalize paragraph breaks
     text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)  # single newline → space
     
-    # 4. Add a gentle pause cue ("...") after paragraph breaks.
-    #    The model interprets "..." as a natural hesitation/pause.
+    # 4. Paragraph breaks → ellipsis pause (model treats "..." as a natural breath)
     text = text.replace('\n\n', '... ')
     
-    # 5. Collapse excessive whitespace
+    # 5. PACING CUES FOR CALM STORYTELLING:
+    #    Insert a comma after long clausess (15+ words without punctuation)
+    #    so the model takes a natural micro-breath. This is exactly how
+    #    audiobook narrators pace themselves — breathing between thoughts.
+    words = text.split()
+    paced_words = []
+    words_since_pause = 0
+    for word in words:
+        paced_words.append(word)
+        words_since_pause += 1
+        # Check if this word already ends with punctuation
+        has_punctuation = word and word[-1] in '.!?,;:—-"\')'
+        if has_punctuation:
+            words_since_pause = 0
+        elif words_since_pause >= 15:
+            # Add a comma to create a breathing point
+            paced_words[-1] = word + ','
+            words_since_pause = 0
+    text = ' '.join(paced_words)
+    
+    # 6. Collapse excessive whitespace
     text = re.sub(r'  +', ' ', text)
     
     return text.strip()
@@ -451,107 +473,6 @@ def trim_internal_silence(audio, sr, max_silence_sec=0.35, silence_threshold_db=
     return audio
 
 
-def normalize_speaking_rate(wavs, texts, sr, tolerance=0.10):
-    """Normalize speaking rate across chunks via time-stretching.
-    
-    Two-phase normalization:
-      1. ABSOLUTE: Cap rate at a comfortable storytelling pace (~11 chars/sec ≈ 120 wpm).
-         If the model generates fast speech, ALL chunks slow down to a pleasant pace.
-      2. RELATIVE: Normalize outlier chunks to the target rate so they all match.
-    
-    Uses librosa's phase vocoder for high-quality pitch-preserving time-stretch.
-    
-    Args:
-        wavs: list of numpy arrays (audio chunks)
-        texts: list of strings (corresponding text for each chunk)
-        sr: sample rate
-        tolerance: maximum allowed deviation from target (0.10 = 10%)
-    
-    Returns:
-        list of numpy arrays with normalized speaking rates
-    """
-    if len(wavs) < 2:
-        return wavs  # Nothing to normalize with a single chunk
-    
-    # COMFORTABLE STORYTELLING PACE
-    # ~10 chars/sec (excluding spaces) ≈ 110-115 words/min
-    # This is the ideal pace for children's bedtime story narration:
-    # calm, clear, warm, and unhurried — but not dragging.
-    # For reference:
-    #   - Fast news reading: ~16-18 chars/sec (180+ wpm)
-    #   - Normal conversation: ~13-14 chars/sec (150 wpm)
-    #   - Audiobook narration: ~11-12 chars/sec (120-130 wpm)
-    #   - Children's storytelling: ~10 chars/sec (110-115 wpm) ← target
-    #   - Slow/dramatic reading: ~8-9 chars/sec (100 wpm) ← floor
-    MAX_COMFORTABLE_RATE = 10.0  # chars/sec — calm storytelling pace
-    MIN_COMFORTABLE_RATE = 8.0   # chars/sec — don't let it drag
-    
-    # 1. Measure speaking rate for each chunk (chars per second of audio)
-    rates = []
-    for wav, text in zip(wavs, texts):
-        duration = len(wav) / sr
-        if duration < 0.5:  # Skip near-empty chunks
-            rates.append(None)
-            continue
-        # Use character count (excluding spaces) as a proxy for speech content
-        char_count = len(text.replace(' ', ''))
-        rate = char_count / duration  # chars/sec
-        rates.append(rate)
-    
-    # 2. Calculate target rate: clamp between comfortable min and max
-    #    - If median > MAX → slow everything down to comfortable pace
-    #    - If median < MIN → speed up slightly so it doesn't drag
-    #    - If median is in the sweet spot → use median as-is
-    valid_rates = [r for r in rates if r is not None]
-    if len(valid_rates) < 2:
-        return wavs
-    
-    median_rate = float(np.median(valid_rates))
-    target_rate = max(MIN_COMFORTABLE_RATE, min(median_rate, MAX_COMFORTABLE_RATE))
-    
-    print(f"\n{'─'*50}")
-    print(f"[rate_norm] 📊 Per-chunk rates: {[f'{r:.1f}' if r else 'skip' for r in rates]}")
-    print(f"[rate_norm] 📈 Median: {median_rate:.1f} chars/sec | Comfortable max: {MAX_COMFORTABLE_RATE:.0f} chars/sec")
-    print(f"[rate_norm] 🎯 Target rate: {target_rate:.1f} chars/sec")
-    print(f"[rate_norm] 🔧 Tolerance: ±{tolerance*100:.0f}%")
-    
-    # 3. Time-stretch every chunk toward the target rate
-    normalized = []
-    adjustments = 0
-    for i, (wav, rate) in enumerate(zip(wavs, rates)):
-        if rate is None:
-            normalized.append(wav)
-            continue
-        
-        deviation = (rate - target_rate) / target_rate
-        
-        if abs(deviation) > tolerance:
-            # stretch_factor > 1.0 = chunk is too fast, needs to slow down
-            # stretch_factor < 1.0 = chunk is too slow, needs to speed up
-            stretch_factor = rate / target_rate
-            
-            # Safety cap: never stretch more than 40% to avoid artifacts
-            stretch_factor = max(0.60, min(1.40, stretch_factor))
-            
-            direction = "faster→slower" if stretch_factor > 1.0 else "slower→faster"
-            print(f"[rate_norm] ⚡ Chunk {i}: {rate:.1f} → {target_rate:.1f} chars/s (stretch {stretch_factor:.2f}x, {direction})")
-            
-            # librosa.effects.time_stretch: rate > 1.0 = speed up, rate < 1.0 = slow down
-            # We invert: to slow a fast chunk (stretch_factor > 1), pass rate < 1
-            stretched = librosa.effects.time_stretch(wav.astype(np.float32), rate=1.0/stretch_factor)
-            normalized.append(stretched.astype(np.float32))
-            adjustments += 1
-        else:
-            normalized.append(wav)
-            print(f"[rate_norm] ✅ Chunk {i}: {rate:.1f} chars/s (within ±{tolerance*100:.0f}% of {target_rate:.1f})")
-    
-    if adjustments > 0:
-        print(f"[rate_norm] 🎬 Adjusted {adjustments}/{len(wavs)} chunks to target {target_rate:.1f} chars/sec")
-    else:
-        print(f"[rate_norm] ✅ All chunks within tolerance — no adjustment needed")
-    print(f"{'─'*50}\n")
-    
-    return normalized
 
 
 def normalize_reference_audio(voice_path, sr=24000):
@@ -718,31 +639,30 @@ def generate_tts_handler(job):
     
     print(f"[TTS] Initializing generation for: {text[:50]}...")
     
-    # --- VOICE SETTINGS (STORYTELLING MODE) ---
-    # Tuned for children's audiobook narration: expressive + calm.
-    # The model generates LIVELY, ANIMATED speech (high main talker creativity),
-    # then the post-processing rate normalizer slows it to a comfortable pace.
-    # Result: a warm, engaging narrator who speaks clearly and calmly.
+    # --- VOICE SETTINGS (CHILDREN'S STORYTELLING) ---
+    # Balanced for natural, calm, expressive narration.
+    # The text preprocessor adds pacing cues (commas, ellipses) that make the
+    # model naturally speak at a relaxed pace. These params control expressiveness.
     #
     # Main Talker: Controls WHAT is said (prosody, word-level expression)
-    #   - Temperature 0.9 → rich pitch variety, animated emphasis, storytelling energy
-    #   - Top_p 0.95 → wide inflection range for character voices & emotional beats
+    #   - Temperature 0.85 → good pitch variety without being erratic
+    #   - Top_p 0.90 → expressive but controlled inflections
     #   - Top_k 50 → standard vocabulary
-    #   - Repetition_penalty 1.0 → neutral; natural speech has repeated rhythms
-    temperature = float(inp.get("temperature", 0.9))
-    top_p = float(inp.get("top_p", 0.95))
-    repetition_penalty = float(inp.get("repetition_penalty", 1.0))
+    #   - Repetition_penalty 1.02 → gentle nudge against monotone repetition
+    temperature = float(inp.get("temperature", 0.85))
+    top_p = float(inp.get("top_p", 0.90))
+    repetition_penalty = float(inp.get("repetition_penalty", 1.02))
     top_k = int(inp.get("top_k", 50))
     
     # Subtalker (acoustic code predictor): Controls HOW it sounds (pitch, tone, energy)
-    # Slightly warm for natural vocal quality, but still consistent across chunks.
-    #   - Temperature 0.4 → warm, natural resonance without drifting timbre
-    #   - Top_k 25 → slightly wider acoustic palette for liveliness
-    #   - Top_p 0.85 → allows subtle vocal warmth variations
+    # Moderate warmth: consistent voice quality with natural-sounding variation.
+    #   - Temperature 0.35 → consistent timbre across chunks, not robotic
+    #   - Top_k 20 → focused acoustic palette for voice stability
+    #   - Top_p 0.80 → natural but controlled
     #   - Repetition_penalty 1.05 → prevents monotone droning
-    subtalker_temperature = float(inp.get("subtalker_temperature", 0.4))
-    subtalker_top_k = int(inp.get("subtalker_top_k", 25))
-    subtalker_top_p = float(inp.get("subtalker_top_p", 0.85))
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.35))
+    subtalker_top_k = int(inp.get("subtalker_top_k", 20))
+    subtalker_top_p = float(inp.get("subtalker_top_p", 0.80))
     subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
     
     if not text:
@@ -959,15 +879,14 @@ def generate_tts_handler(job):
             wav = trim_internal_silence(wav, sr, max_silence_sec=0.35)
             processed_wavs.append(wav)
         
-        # SPEAKING RATE NORMALIZATION: Time-stretch chunks to match median speaking rate.
-        # This is the key fix for chunks that talk faster/slower than others.
-        # Must happen BEFORE loudness normalization since stretching changes amplitude.
-        processed_wavs = normalize_speaking_rate(processed_wavs, text_chunks, sr, tolerance=0.10)
-        
-        # Per-chunk loudness normalization (after rate normalization)
+        # Per-chunk loudness normalization
         normalized_wavs = []
-        for wav in processed_wavs:
+        for idx, wav in enumerate(processed_wavs):
             wav = normalize_audio_loudness(wav, sr, target_dbfs=-14.0)
+            duration = len(wav) / sr
+            char_count = len(text_chunks[idx].replace(' ', ''))
+            rate = char_count / duration if duration > 0 else 0
+            print(f"[chunk {idx}] 📊 {duration:.1f}s | {rate:.1f} chars/sec | {len(text_chunks[idx])} chars")
             normalized_wavs.append(wav)
         
         # Stitch chunks together with crossfade + pauses
