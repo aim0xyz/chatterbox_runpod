@@ -113,7 +113,7 @@ def ensure_turbo_activated():
                     language="english", 
                     ref_audio=dummy_ref,
                     ref_text="This is a warmup reference text.",
-                    max_new_tokens=1024
+                    max_new_tokens=256  # Just enough to trigger compilation, not full generation
                  )
         print("[Turbo] ✅ Nitro-Engine Active. No more hangs, no more crashes.")
     except Exception as e:
@@ -743,8 +743,16 @@ def generate_tts_handler(job):
 
         # BATCH GENERATION: Process all chunks in parallel for maximum speed.
         # Per-chunk normalization + crossfading smooths out any tone differences.
-        limit = 1024
+        #
+        # CRITICAL: Dynamic max_new_tokens based on actual text length.
+        # In batch mode, ALL chunks generate for max_new_tokens steps (even if
+        # some hit EOS early). One runaway chunk forces the entire batch to wait.
+        # At 12Hz codec and ~130 wpm: 1 char ≈ 0.075s speech ≈ 0.9 tokens.
+        # We add 40% safety margin for natural pauses and expressiveness.
+        max_chunk_chars = max(len(c) for c in text_chunks)
+        limit = min(max(int(max_chunk_chars * 0.9 * 1.4), 200), 512)
         print(f"[TTS] 🚀 Starting BATCH processing of {len(text_chunks)} chunks...")
+        print(f"[TTS] 📊 Dynamic token limit: {limit} (based on longest chunk: {max_chunk_chars} chars)")
         print(f"[TTS] 🔧 Consistency settings: subtalker_temp={subtalker_temperature}, subtalker_top_k={subtalker_top_k}, subtalker_top_p={subtalker_top_p}")
         
         gen_kwargs = dict(
