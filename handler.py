@@ -80,9 +80,14 @@ def ensure_turbo_activated():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         
-        # Disable the features that cause memory crashes
+        # CUDA Graphs MUST be disabled for autoregressive TTS.
+        # The KV cache grows dynamically during generation, which breaks
+        # CUDA graph replay (requires fixed tensor shapes). This caused
+        # the first request to be fast (43s) but subsequent ones 4x slower
+        # (170s) due to re-recording or eager fallback overhead.
+        # Triton kernel optimizations from max-autotune are still active.
         import torch._inductor.config as inductor_config
-        inductor_config.triton.cudagraphs = True
+        inductor_config.triton.cudagraphs = False
         
         # 2. NITRO COMPILATION
         # We only compile the main backbone. It's stable and fast.
@@ -358,6 +363,91 @@ def normalize_audio_loudness(audio, sr, target_dbfs=-14.0):
     print(f"[normalize] ✅ Final RMS: {final_rms:.4f} ({20 * np.log10(final_rms + 1e-10):.1f} dBFS)")
     
     return normalized
+
+
+def trim_internal_silence(audio, sr, max_silence_sec=0.35, silence_threshold_db=-40):
+    """Trim excessively long silences WITHIN a generated audio chunk.
+    
+    The TTS model sometimes generates 1-2+ second silence gaps between sentences
+    (especially after periods). This detects long silent regions and caps them
+    at max_silence_sec (default 0.35s), producing natural-sounding pauses.
+    
+    Args:
+        audio: numpy array of audio samples
+        sr: sample rate
+        max_silence_sec: maximum allowed silence duration (seconds)
+        silence_threshold_db: threshold below which audio is considered silent (dB)
+    
+    Returns:
+        Trimmed audio numpy array
+    """
+    if len(audio) < sr * 0.1:  # Skip very short audio
+        return audio
+    
+    # Convert threshold from dB to linear amplitude
+    silence_threshold = 10 ** (silence_threshold_db / 20.0)
+    max_silence_samples = int(max_silence_sec * sr)
+    
+    # Use a frame-based approach for efficiency
+    frame_size = int(0.02 * sr)  # 20ms frames
+    
+    # Calculate RMS energy per frame
+    n_frames = len(audio) // frame_size
+    if n_frames < 3:
+        return audio
+    
+    is_silent = np.zeros(n_frames, dtype=bool)
+    for i in range(n_frames):
+        frame = audio[i * frame_size : (i + 1) * frame_size]
+        rms = np.sqrt(np.mean(frame ** 2))
+        is_silent[i] = rms < silence_threshold
+    
+    # Find runs of silent frames
+    result_parts = []
+    i = 0
+    audio_pos = 0
+    trimmed_count = 0
+    
+    while i < n_frames:
+        if is_silent[i]:
+            # Count consecutive silent frames
+            silence_start = i
+            while i < n_frames and is_silent[i]:
+                i += 1
+            silence_end = i
+            
+            silence_sample_start = silence_start * frame_size
+            silence_sample_end = min(silence_end * frame_size, len(audio))
+            silence_duration_samples = silence_sample_end - silence_sample_start
+            
+            # Add any audio before this silence region
+            if silence_sample_start > audio_pos:
+                result_parts.append(audio[audio_pos:silence_sample_start])
+            
+            # If silence is too long, cap it
+            if silence_duration_samples > max_silence_samples:
+                result_parts.append(np.zeros(max_silence_samples, dtype=audio.dtype))
+                trimmed_duration = (silence_duration_samples - max_silence_samples) / sr
+                trimmed_count += 1
+            else:
+                # Keep the silence as-is
+                result_parts.append(audio[silence_sample_start:silence_sample_end])
+            
+            audio_pos = silence_sample_end
+        else:
+            i += 1
+    
+    # Add remaining audio
+    if audio_pos < len(audio):
+        result_parts.append(audio[audio_pos:])
+    
+    if trimmed_count > 0:
+        trimmed_audio = np.concatenate(result_parts) if result_parts else audio
+        saved_sec = (len(audio) - len(trimmed_audio)) / sr
+        print(f"[silence_trim] ✂️  Trimmed {trimmed_count} long silence(s), saved {saved_sec:.2f}s")
+        return trimmed_audio
+    
+    return audio
 
 
 def normalize_reference_audio(voice_path, sr=24000):
@@ -707,9 +797,12 @@ def generate_tts_handler(job):
         CROSSFADE_MS = 40  # 40ms crossfade between chunks (sounds natural)
         crossfade_samples = int(CROSSFADE_MS / 1000.0 * sr)
         
-        # Normalize all chunks individually first
+        # Trim internal silence + normalize all chunks individually
         normalized_wavs = []
-        for wav in wavs:
+        for idx, wav in enumerate(wavs):
+            # Trim excessively long silences WITHIN each chunk
+            # (model sometimes generates 1-2s gaps between sentences)
+            wav = trim_internal_silence(wav, sr, max_silence_sec=0.35)
             wav = normalize_audio_loudness(wav, sr, target_dbfs=-14.0)
             normalized_wavs.append(wav)
         
