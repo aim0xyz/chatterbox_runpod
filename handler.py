@@ -9,6 +9,7 @@ import json
 import io
 import time
 import re
+import librosa
 import soundfile as sf
 import numpy as np
 from pathlib import Path
@@ -450,6 +451,93 @@ def trim_internal_silence(audio, sr, max_silence_sec=0.35, silence_threshold_db=
     return audio
 
 
+def normalize_speaking_rate(wavs, texts, sr, tolerance=0.10):
+    """Normalize speaking rate across chunks via time-stretching.
+    
+    Measures the actual speaking rate (characters / second of audio) for each
+    chunk, then time-stretches any chunk that deviates more than `tolerance`
+    from the median rate. This ensures all chunks sound like they're spoken
+    at the same consistent pace.
+    
+    Uses librosa's phase vocoder for high-quality pitch-preserving time-stretch.
+    
+    Args:
+        wavs: list of numpy arrays (audio chunks)
+        texts: list of strings (corresponding text for each chunk)
+        sr: sample rate
+        tolerance: maximum allowed deviation from median (0.10 = 10%)
+    
+    Returns:
+        list of numpy arrays with normalized speaking rates
+    """
+    if len(wavs) < 2:
+        return wavs  # Nothing to normalize with a single chunk
+    
+    # 1. Measure speaking rate for each chunk (chars per second of audio)
+    rates = []
+    for wav, text in zip(wavs, texts):
+        duration = len(wav) / sr
+        if duration < 0.5:  # Skip near-empty chunks
+            rates.append(None)
+            continue
+        # Use character count (excluding spaces) as a proxy for speech content
+        char_count = len(text.replace(' ', ''))
+        rate = char_count / duration  # chars/sec
+        rates.append(rate)
+    
+    # 2. Calculate median rate (ignoring None entries)
+    valid_rates = [r for r in rates if r is not None]
+    if len(valid_rates) < 2:
+        return wavs
+    
+    median_rate = float(np.median(valid_rates))
+    print(f"\n{'─'*50}")
+    print(f"[rate_norm] 🎯 Median speaking rate: {median_rate:.1f} chars/sec")
+    print(f"[rate_norm] 📊 Per-chunk rates: {[f'{r:.1f}' if r else 'skip' for r in rates]}")
+    print(f"[rate_norm] 🔧 Tolerance: ±{tolerance*100:.0f}%")
+    
+    # 3. Time-stretch chunks that deviate too much
+    normalized = []
+    adjustments = 0
+    for i, (wav, rate) in enumerate(zip(wavs, rates)):
+        if rate is None:
+            normalized.append(wav)
+            continue
+        
+        deviation = (rate - median_rate) / median_rate
+        
+        if abs(deviation) > tolerance:
+            # stretch_factor > 1.0 = slow down (chunk was too fast)
+            # stretch_factor < 1.0 = speed up (chunk was too slow)
+            stretch_factor = rate / median_rate
+            
+            # Safety cap: never stretch more than 30% in either direction
+            # to avoid artifacts
+            stretch_factor = max(0.70, min(1.30, stretch_factor))
+            
+            direction = "faster→slower" if stretch_factor > 1.0 else "slower→faster"
+            print(f"[rate_norm] ⚡ Chunk {i}: {rate:.1f} chars/s → stretch {stretch_factor:.2f}x ({direction})")
+            
+            # Use librosa's time_stretch (phase vocoder) for pitch-preserving tempo change
+            # time_stretch with rate < 1.0 slows down, > 1.0 speeds up
+            # We want the inverse: if our stretch_factor > 1.0 (chunk too fast),
+            # we want to slow it down, so we pass 1/stretch_factor to time_stretch
+            stretched = librosa.effects.time_stretch(wav.astype(np.float32), rate=1.0/stretch_factor)
+            normalized.append(stretched.astype(np.float32))
+            adjustments += 1
+        else:
+            normalized.append(wav)
+            print(f"[rate_norm] ✅ Chunk {i}: {rate:.1f} chars/s (within tolerance)")
+    
+    if adjustments > 0:
+        print(f"[rate_norm] 🎬 Adjusted {adjustments}/{len(wavs)} chunks to match median rate")
+    else:
+        print(f"[rate_norm] ✅ All chunks within tolerance — no adjustment needed")
+    print(f"{'─'*50}\n")
+    
+    return normalized
+
+
 def normalize_reference_audio(voice_path, sr=24000):
     """Normalize the reference voice recording for better voice DNA extraction.
     
@@ -824,7 +912,7 @@ def generate_tts_handler(job):
         crossfade_samples = int(CROSSFADE_MS / 1000.0 * sr)
         
         # Per-chunk post-processing: duration cap + silence trim + normalize
-        normalized_wavs = []
+        processed_wavs = []
         for idx, (wav, chunk_text) in enumerate(zip(wavs, text_chunks)):
             # DURATION CAP: Truncate garbage audio at end of chunk.
             # The model sometimes generates noise/artifacts past the end of
@@ -844,6 +932,16 @@ def generate_tts_handler(job):
             # Trim excessively long silences WITHIN each chunk
             # (model sometimes generates 1-2s gaps between sentences)
             wav = trim_internal_silence(wav, sr, max_silence_sec=0.35)
+            processed_wavs.append(wav)
+        
+        # SPEAKING RATE NORMALIZATION: Time-stretch chunks to match median speaking rate.
+        # This is the key fix for chunks that talk faster/slower than others.
+        # Must happen BEFORE loudness normalization since stretching changes amplitude.
+        processed_wavs = normalize_speaking_rate(processed_wavs, text_chunks, sr, tolerance=0.10)
+        
+        # Per-chunk loudness normalization (after rate normalization)
+        normalized_wavs = []
+        for wav in processed_wavs:
             wav = normalize_audio_loudness(wav, sr, target_dbfs=-14.0)
             normalized_wavs.append(wav)
         
