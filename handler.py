@@ -291,7 +291,7 @@ def decrypt_voice(encrypted_base64, key_base64):
 # TEXT PREPROCESSING FOR NATURAL SPEECH
 # ==========================================
 def preprocess_text_for_natural_speech(text):
-    """Preprocess text for calm, naturally-paced children's storytelling.
+    """Preprocess text for expressive, naturally-paced children's storytelling.
     
     The TTS model uses punctuation as pacing cues — commas create short pauses,
     periods create longer pauses, and ellipses create dramatic breathing pauses.
@@ -322,7 +322,7 @@ def preprocess_text_for_natural_speech(text):
     text = text.replace('\n\n', '... ')
     
     # 5. PACING CUES FOR CALM STORYTELLING:
-    #    Insert a comma after long clausess (15+ words without punctuation)
+    #    Insert a comma after long clauses (15+ words without punctuation)
     #    so the model takes a natural micro-breath. This is exactly how
     #    audiobook narrators pace themselves — breathing between thoughts.
     words = text.split()
@@ -341,7 +341,32 @@ def preprocess_text_for_natural_speech(text):
             words_since_pause = 0
     text = ' '.join(paced_words)
     
-    # 6. Collapse excessive whitespace
+    # 6. EXPRESSIVENESS BOOST FOR KIDS STORIES:
+    #    Exclamation points carry much more prosodic energy than periods.
+    #    Convert obvious story exclamation sentences (short, energetic endings)
+    #    to use '!' so the model narrates them with excitement and wonder.
+    #    Only applies to sentences that are clearly exclamatory in nature.
+    def boost_expressive_sentences(t):
+        """Heuristically replace '.' with '!' on short, energetic sentences."""
+        exclamatory_starters = (
+            'Oh', 'Wow', 'Yes', 'No', 'Hooray', 'Yay', 'What', 'How wonderful',
+            'How exciting', 'How magical', 'Look', 'Listen', 'Amazing', 'Incredible',
+            'Suddenly', 'All of a sudden', 'At last', 'Finally', 'And then',
+        )
+        def replace_match(m):
+            sentence = m.group(0)
+            # Only apply to short sentences (< 80 chars) ending in period (not already !?)
+            if sentence.endswith('.') and len(sentence) < 80:
+                for starter in exclamatory_starters:
+                    if sentence.startswith(starter):
+                        return sentence[:-1] + '!'
+            return sentence
+        # Match individual sentences
+        return re.sub(r'[A-Z][^.!?]*[.!?]', replace_match, t)
+    
+    text = boost_expressive_sentences(text)
+    
+    # 7. Collapse excessive whitespace
     text = re.sub(r'  +', ' ', text)
     
     return text.strip()
@@ -421,11 +446,12 @@ def match_spectral_envelope(wavs, sr):
     return matched
 
 
-def normalize_audio_loudness(audio, sr, target_dbfs=-14.0):
+def normalize_audio_loudness(audio, sr, target_dbfs=-16.0):
     """Normalize audio loudness using RMS-based gain.
     
     Applies gain to bring the audio to a consistent loudness level.
-    Target is -14 dBFS which is the standard for spoken word / audiobooks.
+    Target is -16 dBFS (slightly conservative) to leave headroom for the
+    peak limiter that runs afterward on the final combined audio.
     """
     if len(audio) == 0:
         return audio
@@ -437,7 +463,7 @@ def normalize_audio_loudness(audio, sr, target_dbfs=-14.0):
         return audio
     
     # Calculate target RMS from dBFS
-    target_rms = 10 ** (target_dbfs / 20.0)  # -14 dBFS ≈ 0.1995
+    target_rms = 10 ** (target_dbfs / 20.0)  # -16 dBFS ≈ 0.1585
     
     # Calculate required gain
     gain = target_rms / rms
@@ -460,6 +486,66 @@ def normalize_audio_loudness(audio, sr, target_dbfs=-14.0):
     print(f"[normalize] ✅ Final RMS: {final_rms:.4f} ({20 * np.log10(final_rms + 1e-10):.1f} dBFS)")
     
     return normalized
+
+
+def apply_peak_limiter(audio, threshold_dbfs=-1.0, release_ms=50, sr=24000):
+    """Soft-knee peak limiter to prevent clipping and loudness spikes.
+    
+    This is a lookahead-free, sample-accurate limiter that smooths gain
+    reductions over 'release_ms' milliseconds. It prevents the harsh
+    digital clipping that causes the 'too loud / clips' complain, while
+    keeping natural dynamics intact.
+    
+    Args:
+        audio: numpy float32 array of audio samples
+        threshold_dbfs: ceiling level in dBFS (default -1.0 dBFS — tight but not silent)
+        release_ms: how quickly gain recovers after a peak (smoother = more transparent)
+        sr: sample rate
+    
+    Returns:
+        Peak-limited numpy float32 array
+    """
+    if len(audio) == 0:
+        return audio
+    
+    threshold_linear = 10 ** (threshold_dbfs / 20.0)
+    
+    # Check if limiting is even needed
+    peak = float(np.max(np.abs(audio)))
+    if peak <= threshold_linear:
+        print(f"[limiter] ✅ No limiting needed (peak={20*np.log10(peak+1e-10):.1f} dBFS, threshold={threshold_dbfs} dBFS)")
+        return audio
+    
+    print(f"[limiter] 🎚️  Applying peak limiter (peak={20*np.log10(peak+1e-10):.1f} dBFS → ceiling={threshold_dbfs} dBFS)")
+    
+    # Compute per-sample gain reduction using a simple envelope follower
+    # with instant attack (sample-accurate) and smooth release.
+    abs_audio = np.abs(audio)
+    release_coeff = np.exp(-1.0 / (sr * release_ms / 1000.0))  # 1-pole IIR smoothing
+    
+    # Build gain envelope: where audio exceeds threshold, reduce gain
+    gain_envelope = np.ones(len(audio), dtype=np.float32)
+    current_gain = 1.0
+    
+    for i in range(len(audio)):
+        desired_gain = min(1.0, threshold_linear / max(abs_audio[i], 1e-10))
+        if desired_gain < current_gain:
+            # Instant attack: reduce gain immediately
+            current_gain = desired_gain
+        else:
+            # Smooth release: gain recovers gradually
+            current_gain = current_gain * release_coeff + desired_gain * (1.0 - release_coeff)
+        gain_envelope[i] = current_gain
+    
+    limited = (audio * gain_envelope).astype(np.float32)
+    
+    # Final hard safety clip (should never trigger after limiter)
+    limited = np.clip(limited, -0.999, 0.999)
+    
+    final_peak = float(np.max(np.abs(limited)))
+    print(f"[limiter] ✅ Limited audio peak: {20*np.log10(final_peak+1e-10):.1f} dBFS")
+    
+    return limited
 
 
 def trim_internal_silence(audio, sr, max_silence_sec=0.35, silence_threshold_db=-40):
@@ -723,9 +809,16 @@ def generate_tts_handler(job):
     #   - Top_p 0.90 → expressive but controlled inflections
     #   - Top_k 50 → standard vocabulary
     #   - Repetition_penalty 1.02 → gentle nudge against monotone repetition
-    temperature = float(inp.get("temperature", 0.85))
-    top_p = float(inp.get("top_p", 0.90))
-    repetition_penalty = float(inp.get("repetition_penalty", 1.02))
+    # --- GENERATION PARAMETERS (EXPRESSIVE CHILDREN'S STORYTELLING) ---
+    # Main Talker: Controls WHAT is said — prosody, word-level expression, pitch variety.
+    #   - Temperature 0.92 → more pitch variety and emotion than default 0.85,
+    #     giving the narrator a natural storytelling lilt without being erratic
+    #   - Top_p 0.95 → wider token selection allows richer intonation patterns
+    #   - Top_k 50 → standard vocabulary breadth
+    #   - Repetition_penalty 1.05 → stronger nudge against monotone repetition
+    temperature = float(inp.get("temperature", 0.92))
+    top_p = float(inp.get("top_p", 0.95))
+    repetition_penalty = float(inp.get("repetition_penalty", 1.05))
     top_k = int(inp.get("top_k", 50))
     
     # Subtalker (acoustic code predictor): Controls HOW it sounds (pitch, tone, energy)
@@ -733,13 +826,15 @@ def generate_tts_handler(job):
     # The subtalker controls room tone, breathiness, mic proximity, tonal warmth.
     # With sampling, each chunk sounds like a different recording session.
     # By making it near-deterministic, all chunks sound like the SAME recording.
-    #   - Temperature 0.2 → very tight acoustic consistency
-    #   - Top_k 5 → extremely focused acoustic palette
-    #   - Top_p 0.50 → only the most likely acoustic tokens
+    #   - Temperature 0.25 → tight acoustic consistency (slightly relaxed from 0.2)
+    #     A tiny bit of subtalker variety adds natural breath differences between
+    #     sentences, which aids expressiveness without changing the 'room tone'.
+    #   - Top_k 8 → slightly wider acoustic palette (was 5)
+    #   - Top_p 0.55 → slightly wider than before for subtle tonal variation
     #   - Repetition_penalty 1.05 → prevents monotone droning
-    subtalker_temperature = float(inp.get("subtalker_temperature", 0.2))
-    subtalker_top_k = int(inp.get("subtalker_top_k", 5))
-    subtalker_top_p = float(inp.get("subtalker_top_p", 0.50))
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.25))
+    subtalker_top_k = int(inp.get("subtalker_top_k", 8))
+    subtalker_top_p = float(inp.get("subtalker_top_p", 0.55))
     subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
     
     if not text:
@@ -935,6 +1030,20 @@ def generate_tts_handler(job):
         # Per-chunk post-processing: duration cap + silence trim + normalize
         processed_wavs = []
         for idx, (wav, chunk_text) in enumerate(zip(wavs, text_chunks)):
+            # SKIP-SENTENCE FIX: Guard against None or empty/near-empty wavs.
+            # When the model returns an empty or extremely short result for a chunk,
+            # we synthesise a short silence placeholder so the story audio is
+            # never truncated — and we log a warning so it's easy to diagnose.
+            if wav is None or len(wav) == 0:
+                print(f"[duration_cap] ⚠️  Chunk {idx} returned EMPTY audio — replacing with silence. Text: '{chunk_text[:60]}'")
+                wav = np.zeros(int(0.5 * sr), dtype=np.float32)  # 500ms placeholder silence
+                processed_wavs.append(wav)
+                continue
+            
+            min_expected_samples = int(0.1 * sr)  # At least 100ms of real audio
+            if len(wav) < min_expected_samples:
+                print(f"[duration_cap] ⚠️  Chunk {idx} too short ({len(wav)} samples) — may be skipped audio. Text: '{chunk_text[:60]}'")
+            
             # DURATION CAP: Truncate garbage audio at end of chunk.
             # The model sometimes generates noise/artifacts past the end of
             # meaningful speech ("farting" sounds). These have energy so the
@@ -1021,11 +1130,21 @@ def generate_tts_handler(job):
              final_audio = final_audio[:int(max_duration * sr)]
              current_duration = max_duration
         
-        # --- LOUDNESS NORMALIZATION ---
-        # Normalize the final audio to a consistent volume level (-14 dBFS)
-        # This fixes the "audio is too quiet" issue (global check)
+        # --- LOUDNESS NORMALIZATION + PEAK LIMITING ---
+        # Step 1: Normalize the combined audio to a consistent loudness level.
+        # We target -16 dBFS (slightly lower than the standard -14 dBFS) to leave
+        # 2 dB of headroom for the peak limiter below.
         print(f"[TTS] 🔊 Normalizing final audio loudness...")
-        final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-14.0)
+        final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-16.0)
+        
+        # Step 2: Peak limiter — prevents clipping and 'too loud' spikes.
+        # The crossfade blending during stitching can constructively add adjacent
+        # chunks together, briefly exceeding 0 dBFS and causing harsh digital
+        # clipping on playback (especially on phone speakers). The limiter
+        # catches any peaks above -1 dBFS and smoothly pulls them down without
+        # audible pumping, like a professional mastering chain.
+        print(f"[TTS] 🎚️  Applying peak limiter (ceiling=-1.0 dBFS)...")
+        final_audio = apply_peak_limiter(final_audio, threshold_dbfs=-1.0, release_ms=50, sr=sr)
         
         duration = len(final_audio) / sr
         
