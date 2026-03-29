@@ -446,14 +446,15 @@ def match_spectral_envelope(wavs, sr):
     return matched
 
 
-def soft_clip(audio, threshold=0.85):
-    """Gently saturate the signal as it approaches 1.0.
+def soft_clip(audio, threshold_dbfs=-2.0):
+    """Gently saturate the signal as it approaches 0 dBFS.
     
     Hard-clipping (np.clip) creates square-wave-like edges that sound like
     harsh digital distortion. Soft-clipping uses a sigmoid curve (tanh)
     to gently round off peaks that exceed the threshold, preserving
     the professional 'analog' warmth of the voice.
     """
+    threshold = 10 ** (threshold_dbfs / 20.0)
     abs_audio = np.abs(audio)
     mask = abs_audio > threshold
     if not np.any(mask):
@@ -500,7 +501,7 @@ def normalize_audio_loudness(audio, sr, target_dbfs=-16.0):
     normalized = audio * gain
     
     # Soft-clip instead of hard-clip to prevent distortion
-    normalized = soft_clip(normalized, threshold=0.85).astype(np.float32)
+    normalized = soft_clip(normalized, threshold_dbfs=-1.5).astype(np.float32)
     
     final_rms = float(np.sqrt(np.mean(normalized ** 2)))
     print(f"[normalize] ✅ Final RMS: {final_rms:.4f} ({20 * np.log10(final_rms + 1e-10):.1f} dBFS)")
@@ -561,7 +562,7 @@ def apply_peak_limiter(audio, threshold_dbfs=-1.0, release_ms=50, sr=24000):
     limited = (audio * gain_envelope).astype(np.float32)
     
     # Final safety soft-clip (should be minimal after limiter)
-    limited = soft_clip(limited, threshold=0.98)
+    limited = soft_clip(limited, threshold_dbfs=-0.2)
     
     final_peak = float(np.max(np.abs(limited)))
     print(f"[limiter] ✅ Limited audio peak: {20*np.log10(final_peak+1e-10):.1f} dBFS")
@@ -1084,6 +1085,7 @@ def generate_tts_handler(job):
             wav = trim_internal_silence(wav, sr, max_silence_sec=0.35)
             processed_wavs.append(wav)
         
+        normalized_wavs = []
         for idx, wav in enumerate(processed_wavs):
             # Normalizing to -17 dBFS gives us plenty of headroom for crossfading
             # and prevents constructive interference from clipping.
