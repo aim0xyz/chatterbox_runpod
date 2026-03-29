@@ -446,6 +446,26 @@ def match_spectral_envelope(wavs, sr):
     return matched
 
 
+def soft_clip(audio, threshold=0.85):
+    """Gently saturate the signal as it approaches 1.0.
+    
+    Hard-clipping (np.clip) creates square-wave-like edges that sound like
+    harsh digital distortion. Soft-clipping uses a sigmoid curve (tanh)
+    to gently round off peaks that exceed the threshold, preserving
+    the professional 'analog' warmth of the voice.
+    """
+    abs_audio = np.abs(audio)
+    mask = abs_audio > threshold
+    if not np.any(mask):
+        return audio
+    
+    # Standard soft-clipping: threshold + (scale * tanh((x-threshold)/scale))
+    # This ensures the signal never actually hits 1.0 but gets very close.
+    scale = 1.0 - threshold
+    audio[mask] = np.sign(audio[mask]) * (threshold + scale * np.tanh((abs_audio[mask] - threshold) / scale))
+    return audio
+
+
 def normalize_audio_loudness(audio, sr, target_dbfs=-16.0):
     """Normalize audio loudness using RMS-based gain.
     
@@ -468,7 +488,7 @@ def normalize_audio_loudness(audio, sr, target_dbfs=-16.0):
     # Calculate required gain
     gain = target_rms / rms
     
-    # Cap gain to avoid amplifying noise excessively (Increased to 15x for super quiet recordings)
+    # Cap gain to avoid amplifying noise excessively
     max_gain = 15.0
     if gain > max_gain:
         print(f"[normalize] ⚠️  Gain capped at {max_gain}x (original would be {gain:.1f}x)")
@@ -479,8 +499,8 @@ def normalize_audio_loudness(audio, sr, target_dbfs=-16.0):
     # Apply gain
     normalized = audio * gain
     
-    # Hard clip to prevent distortion
-    normalized = np.clip(normalized, -0.999, 0.999).astype(np.float32)
+    # Soft-clip instead of hard-clip to prevent distortion
+    normalized = soft_clip(normalized, threshold=0.85).astype(np.float32)
     
     final_rms = float(np.sqrt(np.mean(normalized ** 2)))
     print(f"[normalize] ✅ Final RMS: {final_rms:.4f} ({20 * np.log10(final_rms + 1e-10):.1f} dBFS)")
@@ -491,19 +511,15 @@ def normalize_audio_loudness(audio, sr, target_dbfs=-16.0):
 def apply_peak_limiter(audio, threshold_dbfs=-1.0, release_ms=50, sr=24000):
     """Soft-knee peak limiter to prevent clipping and loudness spikes.
     
-    This is a lookahead-free, sample-accurate limiter that smooths gain
-    reductions over 'release_ms' milliseconds. It prevents the harsh
-    digital clipping that causes the 'too loud / clips' complain, while
-    keeping natural dynamics intact.
+    This version uses a fast attack (0.5ms) and a smooth release to bring
+    audio levels under the threshold without the harsh 'clicking' or
+    'pumping' sounds associated with instant-attack hard limiters.
     
     Args:
         audio: numpy float32 array of audio samples
-        threshold_dbfs: ceiling level in dBFS (default -1.0 dBFS — tight but not silent)
-        release_ms: how quickly gain recovers after a peak (smoother = more transparent)
+        threshold_dbfs: ceiling level in dBFS (default -1.0 dBFS)
+        release_ms: how quickly gain recovers after a peak
         sr: sample rate
-    
-    Returns:
-        Peak-limited numpy float32 array
     """
     if len(audio) == 0:
         return audio
@@ -513,34 +529,39 @@ def apply_peak_limiter(audio, threshold_dbfs=-1.0, release_ms=50, sr=24000):
     # Check if limiting is even needed
     peak = float(np.max(np.abs(audio)))
     if peak <= threshold_linear:
-        print(f"[limiter] ✅ No limiting needed (peak={20*np.log10(peak+1e-10):.1f} dBFS, threshold={threshold_dbfs} dBFS)")
+        print(f"[limiter] ✅ No limiting needed (peak={20*np.log10(peak+1e-10):.1f} dBFS)")
         return audio
     
     print(f"[limiter] 🎚️  Applying peak limiter (peak={20*np.log10(peak+1e-10):.1f} dBFS → ceiling={threshold_dbfs} dBFS)")
     
-    # Compute per-sample gain reduction using a simple envelope follower
-    # with instant attack (sample-accurate) and smooth release.
-    abs_audio = np.abs(audio)
-    release_coeff = np.exp(-1.0 / (sr * release_ms / 1000.0))  # 1-pole IIR smoothing
+    # Pre-calculate smoothing coefficients
+    attack_ms = 0.5
+    attack_coeff = np.exp(-1.0 / (sr * attack_ms / 1000.0))
+    release_coeff = np.exp(-1.0 / (sr * release_ms / 1000.0))
     
-    # Build gain envelope: where audio exceeds threshold, reduce gain
+    abs_audio = np.abs(audio)
     gain_envelope = np.ones(len(audio), dtype=np.float32)
     current_gain = 1.0
     
+    # Loop over samples applying smoothed gain reduction
     for i in range(len(audio)):
-        desired_gain = min(1.0, threshold_linear / max(abs_audio[i], 1e-10))
-        if desired_gain < current_gain:
-            # Instant attack: reduce gain immediately
-            current_gain = desired_gain
+        # Calculate the instant gain required to hit the threshold
+        target_gain = min(1.0, threshold_linear / max(abs_audio[i], 1e-10))
+        
+        if target_gain < current_gain:
+            # Fast Engagement (Attack)
+            current_gain = current_gain * attack_coeff + target_gain * (1.0 - attack_coeff)
         else:
-            # Smooth release: gain recovers gradually
-            current_gain = current_gain * release_coeff + desired_gain * (1.0 - release_coeff)
+            # Smooth Recovery (Release)
+            current_gain = current_gain * release_coeff + target_gain * (1.0 - release_coeff)
+            
         gain_envelope[i] = current_gain
     
+    # Apply the gain reduction
     limited = (audio * gain_envelope).astype(np.float32)
     
-    # Final hard safety clip (should never trigger after limiter)
-    limited = np.clip(limited, -0.999, 0.999)
+    # Final safety soft-clip (should be minimal after limiter)
+    limited = soft_clip(limited, threshold=0.98)
     
     final_peak = float(np.max(np.abs(limited)))
     print(f"[limiter] ✅ Limited audio peak: {20*np.log10(final_peak+1e-10):.1f} dBFS")
@@ -658,9 +679,9 @@ def normalize_reference_audio(voice_path, sr=24000):
             gain = target_rms / max(rms, 1e-8)
             gain = min(gain, 15.0) 
             
-            # Apply gain and STRICTLY CLIP to prevent the "Min value < -1.0" warning
+            # Apply gain and use soft-clipping to prevent harshness in the reference
             audio_np = audio_np * gain
-            audio_np = np.clip(audio_np, -0.99, 0.99).astype(np.float32)
+            audio_np = soft_clip(audio_np, threshold_dbfs=-0.5).astype(np.float32)
             
             # Save normalized reference
             import torch
@@ -838,8 +859,6 @@ def generate_tts_handler(job):
     subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
     
     if not text:
-        return {"error": "No text provided"}
-
         return {"error": "No text provided"}
 
     # Find prompt audio
@@ -1065,10 +1084,10 @@ def generate_tts_handler(job):
             wav = trim_internal_silence(wav, sr, max_silence_sec=0.35)
             processed_wavs.append(wav)
         
-        # Per-chunk loudness normalization
-        normalized_wavs = []
         for idx, wav in enumerate(processed_wavs):
-            wav = normalize_audio_loudness(wav, sr, target_dbfs=-14.0)
+            # Normalizing to -17 dBFS gives us plenty of headroom for crossfading
+            # and prevents constructive interference from clipping.
+            wav = normalize_audio_loudness(wav, sr, target_dbfs=-17.0)
             duration = len(wav) / sr
             char_count = len(text_chunks[idx].replace(' ', ''))
             rate = char_count / duration if duration > 0 else 0
@@ -1130,21 +1149,15 @@ def generate_tts_handler(job):
              final_audio = final_audio[:int(max_duration * sr)]
              current_duration = max_duration
         
-        # --- LOUDNESS NORMALIZATION + PEAK LIMITING ---
         # Step 1: Normalize the combined audio to a consistent loudness level.
-        # We target -16 dBFS (slightly lower than the standard -14 dBFS) to leave
-        # 2 dB of headroom for the peak limiter below.
+        # We target -16.5 dBFS to leave enough headroom for peak limiting.
         print(f"[TTS] 🔊 Normalizing final audio loudness...")
-        final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-16.0)
+        final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-16.5)
         
         # Step 2: Peak limiter — prevents clipping and 'too loud' spikes.
-        # The crossfade blending during stitching can constructively add adjacent
-        # chunks together, briefly exceeding 0 dBFS and causing harsh digital
-        # clipping on playback (especially on phone speakers). The limiter
-        # catches any peaks above -1 dBFS and smoothly pulls them down without
-        # audible pumping, like a professional mastering chain.
-        print(f"[TTS] 🎚️  Applying peak limiter (ceiling=-1.0 dBFS)...")
-        final_audio = apply_peak_limiter(final_audio, threshold_dbfs=-1.0, release_ms=50, sr=sr)
+        # Uses 0.5ms attack and soft-knee saturation for a professional finish.
+        print(f"[TTS] 🎚️  Applying peak limiter (ceiling=-1.5 dBFS)...")
+        final_audio = apply_peak_limiter(final_audio, threshold_dbfs=-1.5, release_ms=60, sr=sr)
         
         duration = len(final_audio) / sr
         
