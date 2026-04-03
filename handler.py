@@ -335,8 +335,9 @@ def preprocess_text_for_natural_speech(text):
         has_punctuation = word and word[-1] in '.!?,;:—-"\')'
         if has_punctuation:
             words_since_pause = 0
-        elif words_since_pause >= 15:
-            # Add a comma to create a breathing point
+        elif words_since_pause >= 22:
+            # Add a comma to create a breathing point — only every 22 words
+            # (was 15, which was too frequent and sounded choppy/robotic)
             paced_words[-1] = word + ','
             words_since_pause = 0
     text = ' '.join(paced_words)
@@ -838,26 +839,23 @@ def generate_tts_handler(job):
     #   - Top_p 0.95 → wider token selection allows richer intonation patterns
     #   - Top_k 50 → standard vocabulary breadth
     #   - Repetition_penalty 1.05 → stronger nudge against monotone repetition
-    temperature = float(inp.get("temperature", 0.92))
-    top_p = float(inp.get("top_p", 0.95))
-    repetition_penalty = float(inp.get("repetition_penalty", 1.05))
-    top_k = int(inp.get("top_k", 50))
+    # Main talker: controls prosody, pitch variety, emotional inflection.
+    # Higher temperature → more natural storytelling lilt and expressive range.
+    # top_p 0.97 gives wider intonation patterns for a warmer, less robotic feel.
+    temperature = float(inp.get("temperature", 0.97))
+    top_p = float(inp.get("top_p", 0.97))
+    repetition_penalty = float(inp.get("repetition_penalty", 1.08))
+    top_k = int(inp.get("top_k", 60))
     
-    # Subtalker (acoustic code predictor): Controls HOW it sounds (pitch, tone, energy)
-    # NEAR-DETERMINISTIC: Forces consistent "recording quality" across all chunks.
-    # The subtalker controls room tone, breathiness, mic proximity, tonal warmth.
-    # With sampling, each chunk sounds like a different recording session.
-    # By making it near-deterministic, all chunks sound like the SAME recording.
-    #   - Temperature 0.25 → tight acoustic consistency (slightly relaxed from 0.2)
-    #     A tiny bit of subtalker variety adds natural breath differences between
-    #     sentences, which aids expressiveness without changing the 'room tone'.
-    #   - Top_k 8 → slightly wider acoustic palette (was 5)
-    #   - Top_p 0.55 → slightly wider than before for subtle tonal variation
-    #   - Repetition_penalty 1.05 → prevents monotone droning
-    subtalker_temperature = float(inp.get("subtalker_temperature", 0.25))
-    subtalker_top_k = int(inp.get("subtalker_top_k", 8))
-    subtalker_top_p = float(inp.get("subtalker_top_p", 0.55))
-    subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.05))
+    # Subtalker (acoustic code predictor): Controls HOW it sounds — breath, tone, warmth.
+    # More randomness here = organic variation between sentences (like a real narrator
+    # naturally breathing and shifting slightly). Too low = robotically identical tone.
+    # Too high = each chunk sounds like a different person.
+    # Sweet spot for kids storytelling: temp 0.40, top_k 20, top_p 0.70
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.40))
+    subtalker_top_k = int(inp.get("subtalker_top_k", 20))
+    subtalker_top_p = float(inp.get("subtalker_top_p", 0.70))
+    subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.08))
     
     if not text:
         return {"error": "No text provided"}
@@ -1021,10 +1019,14 @@ def generate_tts_handler(job):
         
         t0 = time.time()
         
-        # Set fixed seed for best-effort consistency across batched chunks
-        torch.manual_seed(42)
+        # Use a time-based seed so each story generation has natural variation.
+        # A fixed seed (42) caused the same pitch contours every time → robotic.
+        # A random seed lets the model breathe differently each time, like a real narrator.
+        _seed = int(time.time() * 1000) % (2**31)
+        torch.manual_seed(_seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(42)
+            torch.cuda.manual_seed_all(_seed)
+        print(f"[TTS] 🎲 Using generation seed: {_seed} (natural variation mode)")
         
         with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
             wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
@@ -1044,7 +1046,7 @@ def generate_tts_handler(job):
         
         # Process results: normalize each chunk + crossfade for seamless transitions
         sr = sample_rate
-        CROSSFADE_MS = 40  # 40ms crossfade between chunks (sounds natural)
+        CROSSFADE_MS = 80  # 80ms crossfade — wider overlap masks stitching seams
         crossfade_samples = int(CROSSFADE_MS / 1000.0 * sr)
         
         # Per-chunk post-processing: duration cap + silence trim + normalize
@@ -1160,6 +1162,26 @@ def generate_tts_handler(job):
         # Uses 0.5ms attack and soft-knee saturation for a professional finish.
         print(f"[TTS] 🎚️  Applying peak limiter (ceiling=-1.5 dBFS)...")
         final_audio = apply_peak_limiter(final_audio, threshold_dbfs=-1.5, release_ms=60, sr=sr)
+        
+        # WARMTH EQ: Gentle high-shelf boost (+1.5 dB above 6kHz) adds "air" and
+        # presence — making the voice sound less flat/digital and more like a real
+        # narrator recorded in a warm room. Kids respond well to this rounded tone.
+        try:
+            from scipy.signal import butter, sosfilt
+            # High-shelf: boost frequencies above 6kHz by ~1.5dB
+            nyq = sr / 2.0
+            sos_hi = butter(2, 6000 / nyq, btype='high', output='sos')
+            hi_shelf = sosfilt(sos_hi, final_audio)
+            final_audio = (final_audio + 0.18 * hi_shelf).astype(np.float32)
+            # Low-shelf: very gentle cut below 100Hz removes rumble/boominess
+            sos_lo = butter(2, 100 / nyq, btype='high', output='sos')
+            final_audio = sosfilt(sos_lo, final_audio).astype(np.float32)
+            # Re-normalize after EQ to stay at target loudness
+            final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-16.5)
+            final_audio = soft_clip(final_audio, threshold_dbfs=-0.5).astype(np.float32)
+            print(f"[TTS] 🎛️  Warmth EQ applied (hi-shelf +1.5dB @6kHz, lo-cut @100Hz)")
+        except Exception as e:
+            print(f"[TTS] ⚠️  Warmth EQ skipped: {e}")
         
         duration = len(final_audio) / sr
         
