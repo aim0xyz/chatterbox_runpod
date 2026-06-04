@@ -186,7 +186,19 @@ def init_model():
 
         print("[startup] Base model ready (Turbo will activate on FIRST request).")
     except Exception as e:
-        print(f"[startup] Critical Error loading model: {e}")
+        # FATAL: if the model can't load (e.g. the worker landed on a GPU whose
+        # CUDA arch this PyTorch build has no kernels for — "no kernel image is
+        # available for execution on the device", typical for Blackwell/sm_120
+        # like the RTX 5090 on an older torch), we must NOT keep running. A
+        # worker with model=None becomes a "poison worker": it keeps pulling
+        # jobs from the queue and failing them all with "Model not loaded",
+        # instead of letting RunPod route them to a healthy worker. Exiting
+        # makes RunPod mark this worker unhealthy, retire it, and re-dispatch
+        # the job elsewhere.
+        print(f"[startup] ❌ FATAL: Critical Error loading model: {e}")
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1)
 
 # Call light init at startup
 if __name__ == "__main__" or os.environ.get("RUNPOD_AGENT_ID"):
@@ -812,42 +824,6 @@ def get_pause_duration_after_chunk(chunk_text, sr):
         return np.zeros(int(0.35 * sr))
 
 
-def time_stretch_preserve_pitch(audio, rate, sr=24000):
-    """Slow down (or speed up) speech WITHOUT changing its pitch.
-
-    Uses a phase vocoder (STFT → re-time the spectrogram → ISTFT). Because we
-    re-integrate phase instead of resampling, the speaker's pitch is preserved —
-    only the pace changes. `rate` is a speed factor:
-        rate < 1.0  → slower / longer  (e.g. 0.90 = 10% slower) — calm narration
-        rate = 1.0  → unchanged
-        rate > 1.0  → faster / shorter
-    Falls back to the original audio if anything goes wrong, so it can never
-    break generation.
-    """
-    if audio is None or len(audio) == 0 or abs(rate - 1.0) < 1e-3:
-        return audio
-    try:
-        import math
-        import torchaudio
-        n_fft = 2048
-        hop = n_fft // 4
-        wav = torch.from_numpy(np.ascontiguousarray(audio)).float()
-        window = torch.hann_window(n_fft)
-        spec = torch.stft(wav, n_fft=n_fft, hop_length=hop, window=window,
-                          return_complex=True)
-        freq = spec.shape[-2]
-        phase_advance = torch.linspace(0, math.pi * hop, freq)[..., None]
-        stretched = torchaudio.functional.phase_vocoder(spec, rate, phase_advance)
-        out = torch.istft(stretched, n_fft=n_fft, hop_length=hop, window=window)
-        result = out.cpu().numpy().astype(np.float32)
-        print(f"[speed] 🐢 Time-stretched: rate={rate} "
-              f"({len(audio)/sr:.1f}s → {len(result)/sr:.1f}s, pitch preserved)")
-        return result
-    except Exception as e:
-        print(f"[speed] ⚠️  Time-stretch skipped ({e}) — keeping original speed")
-        return audio
-
-
 # ==========================================
 # HANDLERS
 # ==========================================
@@ -921,11 +897,10 @@ def generate_tts_handler(job):
     # preserve current production behavior unless explicitly overridden.
     x_vector_only_mode = bool(inp.get("x_vector_only_mode", True))
 
-    # NARRATION SPEED (children's stories should be read calmly and unhurried).
-    # < 1.0 = slower, 1.0 = unchanged. Applied as a pitch-preserving time-stretch
-    # on the final audio, so the voice stays at its natural pitch — only the pace
-    # slows down. 0.90 ≈ 10% slower, a gentle bedtime-story pace.
-    speech_speed = float(inp.get("speech_speed", 0.90))
+    # NOTE: "speech_speed" is intentionally ignored server-side now. Slowing the
+    # read-aloud pace for younger children is handled on the client via the audio
+    # player's native, pitch-preserving setSpeed (clean, no GPU cost). The param
+    # may still arrive in the payload — that's harmless.
 
     if not text:
         return {"error": "No text provided"}
@@ -982,9 +957,13 @@ def generate_tts_handler(job):
         progress_log.append(entry)
         print(f"[Progress] {progress}% - {message}")
 
+    # Raise BEFORE the try/except below so it propagates out of the handler:
+    # RunPod then marks the job FAILED and re-dispatches it to a healthy worker,
+    # instead of the broad except turning it into a consumed {"error": ...}.
+    if model is None:
+        raise RuntimeError("Model not loaded — worker GPU likely incompatible with this PyTorch build")
+
     try:
-        if model is None:
-             return {"error": "Model not loaded"}
 
         # --- VOICE DNA CACHING (create_voice_clone_prompt) ---
         # Pre-encode voice signature ONCE and reuse across all chunks.
@@ -1228,13 +1207,11 @@ def generate_tts_handler(job):
         # Combine all pieces
         final_audio = np.concatenate(final_parts)
 
-        # --- NARRATION SPEED ---
-        # Gently slow the whole narration (pitch preserved) for a calm, unhurried
-        # children's-story pace. Stretching the combined audio also lengthens the
-        # inter-chunk pauses proportionally, which reinforces the relaxed feel.
-        if abs(speech_speed - 1.0) >= 1e-3:
-            print(f"[TTS] 🐢 Applying narration speed {speech_speed} (pitch-preserving)...")
-            final_audio = time_stretch_preserve_pitch(final_audio, speech_speed, sr)
+        # NOTE: Narration speed is intentionally NOT applied here anymore. The
+        # server-side phase-vocoder time-stretch produced a watery/"bad phone
+        # connection" artifact on speech. Slowing the read-aloud pace is now done
+        # on the client via the audio player's native, pitch-preserving setSpeed,
+        # which sounds clean and costs no GPU time.
 
         # --- SAFETY TRUNCATION ---
         # Prevent runaway generation from causing 400 Bad Request (Payload too large)
