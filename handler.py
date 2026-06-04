@@ -754,19 +754,39 @@ def split_into_natural_chunks(text, max_chars=300):
             if sub:
                 final_chunks.append(sub.strip())
     
-    # CRITICAL: Merge tiny chunks into previous chunk.
-    # Chunks under ~60 chars (e.g. "Gute Nacht.") sound robotic because
-    # the model has too little context for natural prosody.
-    MIN_CHUNK_CHARS = 60
-    merged = []
-    for chunk in final_chunks:
-        if merged and len(chunk) < MIN_CHUNK_CHARS:
-            # Merge with previous chunk
-            merged[-1] = merged[-1] + " " + chunk
-            print(f"[chunker] 🔗 Merged short chunk ({len(chunk)} chars) into previous")
-        else:
-            merged.append(chunk)
-    
+    # CRITICAL: Balance chunk lengths to minimize batch-padding disparity.
+    # In batched generation all chunks are padded to the longest one; a short
+    # chunk gets heavily left-padded, which shifts its positional encodings and
+    # flattens its prosody (it sounds monotone). Greedy packing above already
+    # fills most chunks near max_chars — the stragglers are short paragraph
+    # tails. We merge anything below MIN_CHUNK_CHARS into a neighbour, always
+    # choosing one that keeps the result UNDER max_chars, so the batch ends up
+    # near-uniform in length WITHOUT growing the longest chunk (which would cost
+    # generation speed). Band tightens from ~60–400 to ~260–400.
+    MIN_CHUNK_CHARS = int(max_chars * 0.65)  # e.g. 260 for max_chars=400
+    merged = list(final_chunks)
+    changed = True
+    while changed and len(merged) > 1:
+        changed = False
+        for i, chunk in enumerate(merged):
+            if len(chunk) >= MIN_CHUNK_CHARS:
+                continue
+            prev_ok = i > 0 and len(merged[i - 1]) + 1 + len(chunk) <= max_chars
+            next_ok = (i < len(merged) - 1
+                       and len(chunk) + 1 + len(merged[i + 1]) <= max_chars)
+            if prev_ok and (not next_ok or len(merged[i - 1]) <= len(merged[i + 1])):
+                merged[i - 1] = merged[i - 1] + " " + chunk
+                del merged[i]
+                changed = True
+                break
+            elif next_ok:
+                merged[i + 1] = chunk + " " + merged[i + 1]
+                del merged[i]
+                changed = True
+                break
+            # else: merging either side would exceed max_chars → leave as-is
+    print(f"[chunker] 📏 Balanced {len(final_chunks)} → {len(merged)} chunks "
+          f"(min {MIN_CHUNK_CHARS}, cap {max_chars})")
     return merged
 
 
@@ -849,13 +869,21 @@ def generate_tts_handler(job):
     
     # Subtalker (acoustic code predictor): Controls HOW it sounds — breath, tone, warmth.
     # More randomness here = organic variation between sentences (like a real narrator
-    # naturally breathing and shifting slightly). Too low = robotically identical tone.
-    # Too high = each chunk sounds like a different person.
-    # Sweet spot for kids storytelling: temp 0.40, top_k 20, top_p 0.70
-    subtalker_temperature = float(inp.get("subtalker_temperature", 0.40))
+    # naturally breathing and shifting slightly). Too low = robotically identical tone
+    # (the main reason output sounds "like TTS"). Too high = each chunk sounds like a
+    # different person.
+    # Raised from 0.40/0.70 → 0.60/0.85 for noticeably more emotional micro-variation.
+    subtalker_temperature = float(inp.get("subtalker_temperature", 0.60))
     subtalker_top_k = int(inp.get("subtalker_top_k", 20))
-    subtalker_top_p = float(inp.get("subtalker_top_p", 0.70))
+    subtalker_top_p = float(inp.get("subtalker_top_p", 0.85))
     subtalker_repetition_penalty = float(inp.get("subtalker_repetition_penalty", 1.08))
+
+    # Reference style mode. x_vector_only_mode=True keeps ONLY the speaker's timbre
+    # and discards the reference clip's prosody / emotional style → flatter, more
+    # "TTS" sound. Exposed as a param so we can A/B turning it off (which lets the
+    # reference recording's expressiveness carry through). Default stays True to
+    # preserve current production behavior unless explicitly overridden.
+    x_vector_only_mode = bool(inp.get("x_vector_only_mode", True))
     
     if not text:
         return {"error": "No text provided"}
@@ -944,7 +972,7 @@ def generate_tts_handler(job):
             voice_clone_prompt = model.create_voice_clone_prompt(
                 ref_audio=str(voice_path),
                 ref_text=None,
-                x_vector_only_mode=True,
+                x_vector_only_mode=x_vector_only_mode,
             )
             prep_time = time.time() - prep_start
             print(f"[TTS] ✅ Voice DNA cached in {prep_time:.2f}s (reused for all {len(text_chunks)} chunks)")
@@ -1011,7 +1039,7 @@ def generate_tts_handler(job):
         else:
             gen_kwargs["ref_audio"] = str(voice_path)
             gen_kwargs["ref_text"] = None
-            gen_kwargs["x_vector_only_mode"] = True
+            gen_kwargs["x_vector_only_mode"] = x_vector_only_mode
         
         # Sync GPU
         if torch.cuda.is_available():
