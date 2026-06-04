@@ -812,6 +812,42 @@ def get_pause_duration_after_chunk(chunk_text, sr):
         return np.zeros(int(0.35 * sr))
 
 
+def time_stretch_preserve_pitch(audio, rate, sr=24000):
+    """Slow down (or speed up) speech WITHOUT changing its pitch.
+
+    Uses a phase vocoder (STFT → re-time the spectrogram → ISTFT). Because we
+    re-integrate phase instead of resampling, the speaker's pitch is preserved —
+    only the pace changes. `rate` is a speed factor:
+        rate < 1.0  → slower / longer  (e.g. 0.90 = 10% slower) — calm narration
+        rate = 1.0  → unchanged
+        rate > 1.0  → faster / shorter
+    Falls back to the original audio if anything goes wrong, so it can never
+    break generation.
+    """
+    if audio is None or len(audio) == 0 or abs(rate - 1.0) < 1e-3:
+        return audio
+    try:
+        import math
+        import torchaudio
+        n_fft = 2048
+        hop = n_fft // 4
+        wav = torch.from_numpy(np.ascontiguousarray(audio)).float()
+        window = torch.hann_window(n_fft)
+        spec = torch.stft(wav, n_fft=n_fft, hop_length=hop, window=window,
+                          return_complex=True)
+        freq = spec.shape[-2]
+        phase_advance = torch.linspace(0, math.pi * hop, freq)[..., None]
+        stretched = torchaudio.functional.phase_vocoder(spec, rate, phase_advance)
+        out = torch.istft(stretched, n_fft=n_fft, hop_length=hop, window=window)
+        result = out.cpu().numpy().astype(np.float32)
+        print(f"[speed] 🐢 Time-stretched: rate={rate} "
+              f"({len(audio)/sr:.1f}s → {len(result)/sr:.1f}s, pitch preserved)")
+        return result
+    except Exception as e:
+        print(f"[speed] ⚠️  Time-stretch skipped ({e}) — keeping original speed")
+        return audio
+
+
 # ==========================================
 # HANDLERS
 # ==========================================
@@ -884,7 +920,13 @@ def generate_tts_handler(job):
     # reference recording's expressiveness carry through). Default stays True to
     # preserve current production behavior unless explicitly overridden.
     x_vector_only_mode = bool(inp.get("x_vector_only_mode", True))
-    
+
+    # NARRATION SPEED (children's stories should be read calmly and unhurried).
+    # < 1.0 = slower, 1.0 = unchanged. Applied as a pitch-preserving time-stretch
+    # on the final audio, so the voice stays at its natural pitch — only the pace
+    # slows down. 0.90 ≈ 10% slower, a gentle bedtime-story pace.
+    speech_speed = float(inp.get("speech_speed", 0.90))
+
     if not text:
         return {"error": "No text provided"}
 
@@ -990,88 +1032,104 @@ def generate_tts_handler(job):
         print(f"[PROFILER] 🔍 DEEP PERFORMANCE ANALYSIS")
         print(f"{'='*60}\n")
 
-        # BATCH GENERATION: Process all chunks in parallel for maximum speed.
-        # Per-chunk normalization + crossfading smooths out any tone differences.
-        #
-        # CRITICAL: Dynamic max_new_tokens based on actual text length.
-        # In batch mode, ALL chunks generate for max_new_tokens steps (even if
-        # some hit EOS early). One runaway chunk forces the entire batch to wait.
+        # COMMON GENERATION PARAMS (text + max_new_tokens are set PER CHUNK below).
         # At 12Hz codec and ~120 wpm storytelling pace: 1 char ≈ 0.09s ≈ 1.1 tokens.
-        # We add generous 80% margin so the model has room for natural pauses,
+        # We add a generous ~80% margin so the model has room for natural pauses,
         # dramatic beats, and breathing — key for NOT sounding rushed.
-        max_chunk_chars = max(len(c) for c in text_chunks)
-        limit = min(max(int(max_chunk_chars * 1.1 * 1.8), 256), 768)
-        
-        # SORT BY LENGTH: Minimizes left-padding disparity in the batch.
-        # Without this, a 100-char chunk padded to 400 chars gets shifted
-        # positional encodings that alter voice timbre and expressiveness.
-        # We sort before generation and un-sort after to preserve original order.
-        sort_indices = sorted(range(len(text_chunks)), key=lambda i: len(text_chunks[i]))
-        unsort_indices = [0] * len(sort_indices)
-        for new_pos, old_pos in enumerate(sort_indices):
-            unsort_indices[old_pos] = new_pos
-        sorted_chunks = [text_chunks[i] for i in sort_indices]
-        
-        print(f"[TTS] 🚀 Starting BATCH processing of {len(text_chunks)} chunks...")
-        print(f"[TTS] 📊 Dynamic token limit: {limit} (based on longest chunk: {max_chunk_chars} chars)")
-        print(f"[TTS] 🔧 Consistency settings: subtalker_temp={subtalker_temperature}, subtalker_top_k={subtalker_top_k}, subtalker_top_p={subtalker_top_p}")
-        
-        gen_kwargs = dict(
-            text=sorted_chunks,   # Sorted by length for minimal padding disparity
+        gen_kwargs_common = dict(
             language=language,
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
             top_k=top_k,
-            max_new_tokens=limit,
             subtalker_dosample=True,
             subtalker_temperature=subtalker_temperature,
             subtalker_top_k=subtalker_top_k,
             subtalker_top_p=subtalker_top_p,
             subtalker_repetition_penalty=subtalker_repetition_penalty,
-            # CONSISTENCY FIX: non_streaming_mode gives the model full text context
-            # before generating audio, resulting in more consistent prosody across chunks
+            # non_streaming_mode gives the model the full chunk context before
+            # generating audio → more consistent prosody within the chunk.
             non_streaming_mode=True,
         )
-        
         if voice_clone_prompt is not None:
-            gen_kwargs["voice_clone_prompt"] = voice_clone_prompt
+            gen_kwargs_common["voice_clone_prompt"] = voice_clone_prompt
         else:
-            gen_kwargs["ref_audio"] = str(voice_path)
-            gen_kwargs["ref_text"] = None
-            gen_kwargs["x_vector_only_mode"] = x_vector_only_mode
-        
-        # Sync GPU
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        
-        t0 = time.time()
-        
+            gen_kwargs_common["ref_audio"] = str(voice_path)
+            gen_kwargs_common["ref_text"] = None
+            gen_kwargs_common["x_vector_only_mode"] = x_vector_only_mode
+
         # Use a time-based seed so each story generation has natural variation.
         # A fixed seed (42) caused the same pitch contours every time → robotic.
-        # A random seed lets the model breathe differently each time, like a real narrator.
+        # Set ONCE here; each sequential chunk then advances the RNG naturally.
         _seed = int(time.time() * 1000) % (2**31)
         torch.manual_seed(_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(_seed)
         print(f"[TTS] 🎲 Using generation seed: {_seed} (natural variation mode)")
-        
-        with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            wavs, sample_rate = model.generate_voice_clone(**gen_kwargs)
-        
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-            
-        batch_time = time.time() - t0
-        print(f"[PROFILER] 🚀 Batch Generation Complete in {batch_time:.2f}s")
-        
-        # Un-sort wavs back to original chunk order
-        wavs_unsorted = [None] * len(wavs)
-        for sorted_pos, wav in enumerate(wavs):
-            original_pos = sort_indices[sorted_pos]
-            wavs_unsorted[original_pos] = wav
-        wavs = wavs_unsorted
-        
+        t0 = time.time()
+
+        # --- GENERATION: LENGTH-BUCKETED BATCHING ---
+        # The per-chunk quality drop came from LEFT-PADDING: in a batch every
+        # chunk is padded up to the LONGEST one (tokenizer.padding_side='left'),
+        # which shifts the padded chunks' positional encodings and flattens their
+        # prosody. The damage scales with the length *difference*, not with
+        # batching itself. So we batch only chunks of SIMILAR length together:
+        # each bucket pads by at most `bucket_tolerance` chars (≈ inaudible),
+        # while still running its members in parallel for speed.
+        #
+        # This is a dial:
+        #   bucket_tolerance = 0      → every bucket has 1 chunk  → fully sequential
+        #                               (zero padding, max quality, slowest)
+        #   bucket_tolerance = large  → one big bucket            → old single batch
+        #                               (fastest, the original artifact)
+        # Default 40 favours quality while still grouping the (already balanced)
+        # 260–400 char chunks into ~2–3 parallel buckets.
+        bucket_tolerance = int(inp.get("bucket_tolerance", 40))
+
+        # Sort chunk indices by length, then greedily group while the spread
+        # (current length − bucket's shortest) stays within the tolerance.
+        order = sorted(range(len(text_chunks)), key=lambda i: len(text_chunks[i]))
+        buckets = []
+        cur = []
+        for idx in order:
+            if cur and (len(text_chunks[idx]) - len(text_chunks[cur[0]])) > bucket_tolerance:
+                buckets.append(cur)
+                cur = []
+            cur.append(idx)
+        if cur:
+            buckets.append(cur)
+
+        print(f"[TTS] 🎙️  BUCKETED mode: {len(text_chunks)} chunks → {len(buckets)} "
+              f"bucket(s) (tolerance {bucket_tolerance} chars)")
+
+        wavs = [None] * len(text_chunks)
+        sample_rate = sr
+        for bi, bucket in enumerate(buckets):
+            bucket_chunks = [text_chunks[i] for i in bucket]
+            longest = max(len(c) for c in bucket_chunks)
+            # Token budget from the bucket's longest chunk (+ generous margin).
+            limit = min(max(int(longest * 1.1 * 1.8), 256), 768)
+            spread = longest - min(len(c) for c in bucket_chunks)
+            with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                out, sample_rate = model.generate_voice_clone(
+                    text=bucket_chunks, max_new_tokens=limit, **gen_kwargs_common
+                )
+            out_list = list(out) if isinstance(out, (list, tuple)) else [out]
+            for j, original_idx in enumerate(bucket):
+                wavs[original_idx] = out_list[j] if j < len(out_list) else None
+            print(f"[TTS]   ✓ bucket {bi + 1}/{len(buckets)}: {len(bucket)} chunk(s), "
+                  f"len {min(len(c) for c in bucket_chunks)}–{longest} "
+                  f"(pad ≤{spread}), token limit {limit}")
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        gen_time = time.time() - t0
+        print(f"[PROFILER] 🚀 Generation complete in {gen_time:.2f}s "
+              f"({len(buckets)} bucket(s), tolerance {bucket_tolerance})")
+
         # Process results: normalize each chunk + crossfade for seamless transitions
         sr = sample_rate
         CROSSFADE_MS = 80  # 80ms crossfade — wider overlap masks stitching seams
@@ -1169,7 +1227,15 @@ def generate_tts_handler(job):
         
         # Combine all pieces
         final_audio = np.concatenate(final_parts)
-        
+
+        # --- NARRATION SPEED ---
+        # Gently slow the whole narration (pitch preserved) for a calm, unhurried
+        # children's-story pace. Stretching the combined audio also lengthens the
+        # inter-chunk pauses proportionally, which reinforces the relaxed feel.
+        if abs(speech_speed - 1.0) >= 1e-3:
+            print(f"[TTS] 🐢 Applying narration speed {speech_speed} (pitch-preserving)...")
+            final_audio = time_stretch_preserve_pitch(final_audio, speech_speed, sr)
+
         # --- SAFETY TRUNCATION ---
         # Prevent runaway generation from causing 400 Bad Request (Payload too large)
         # If audio is > 10 minutes, something is wrong with the model (loops).
@@ -1181,36 +1247,42 @@ def generate_tts_handler(job):
              final_audio = final_audio[:int(max_duration * sr)]
              current_duration = max_duration
         
-        # Step 1: Normalize the combined audio to a consistent loudness level.
-        # We target -16.5 dBFS to leave enough headroom for peak limiting.
-        print(f"[TTS] 🔊 Normalizing final audio loudness...")
-        final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-16.5)
-        
-        # Step 2: Peak limiter — prevents clipping and 'too loud' spikes.
-        # Uses 0.5ms attack and soft-knee saturation for a professional finish.
-        print(f"[TTS] 🎚️  Applying peak limiter (ceiling=-1.5 dBFS)...")
-        final_audio = apply_peak_limiter(final_audio, threshold_dbfs=-1.5, release_ms=60, sr=sr)
-        
-        # WARMTH EQ: Gentle high-shelf boost (+1.5 dB above 6kHz) adds "air" and
-        # presence — making the voice sound less flat/digital and more like a real
-        # narrator recorded in a warm room. Kids respond well to this rounded tone.
+        # --- FINAL MASTERING CHAIN ---
+        # ORDER MATTERS: the peak limiter MUST be the very last DSP stage, right
+        # before encoding. Previously the warmth EQ (a high-shelf BOOST) ran AFTER
+        # the limiter and re-created sharp high-frequency peaks (sibilants/
+        # transients) that nothing tamed afterwards — heard as a brief "speaker
+        # scratch"/harsh clipping. We now EQ first, normalize, then limit last,
+        # and keep extra true-peak headroom for the lossy MP3 encoder.
+
+        # Step 1: Warmth EQ (gentle). Low-cut removes rumble; a SOFT high-shelf
+        # adds a little air. The boost is kept small (0.10, was 0.18) so it does
+        # not make sibilants harsh/scratchy.
         try:
             from scipy.signal import butter, sosfilt
-            # High-shelf: boost frequencies above 6kHz by ~1.5dB
             nyq = sr / 2.0
-            sos_hi = butter(2, 6000 / nyq, btype='high', output='sos')
-            hi_shelf = sosfilt(sos_hi, final_audio)
-            final_audio = (final_audio + 0.18 * hi_shelf).astype(np.float32)
-            # Low-shelf: very gentle cut below 100Hz removes rumble/boominess
+            # Low-cut @100Hz — remove rumble/boominess
             sos_lo = butter(2, 100 / nyq, btype='high', output='sos')
             final_audio = sosfilt(sos_lo, final_audio).astype(np.float32)
-            # Re-normalize after EQ to stay at target loudness
-            final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-16.5)
-            final_audio = soft_clip(final_audio, threshold_dbfs=-0.5).astype(np.float32)
-            print(f"[TTS] 🎛️  Warmth EQ applied (hi-shelf +1.5dB @6kHz, lo-cut @100Hz)")
+            # Gentle high-shelf "air" above 6kHz (reduced amount)
+            sos_hi = butter(2, 6000 / nyq, btype='high', output='sos')
+            hi_shelf = sosfilt(sos_hi, final_audio)
+            final_audio = (final_audio + 0.10 * hi_shelf).astype(np.float32)
+            print(f"[TTS] 🎛️  Warmth EQ applied (gentle hi-shelf @6kHz, lo-cut @100Hz)")
         except Exception as e:
             print(f"[TTS] ⚠️  Warmth EQ skipped: {e}")
-        
+
+        # Step 2: Normalize loudness. Target -17 dBFS (a touch quieter) so the
+        # limiter can work transparently and there is room under the ceiling.
+        print(f"[TTS] 🔊 Normalizing final audio loudness...")
+        final_audio = normalize_audio_loudness(final_audio, sr, target_dbfs=-17.0)
+
+        # Step 3: Peak limiter — THE LAST stage. Ceiling -2.0 dBFS leaves true-peak
+        # headroom for MP3 (128k) inter-sample overshoot, so playback can't clip
+        # or "scratch". Nothing after this may add gain.
+        print(f"[TTS] 🎚️  Applying FINAL peak limiter (ceiling=-2.0 dBFS)...")
+        final_audio = apply_peak_limiter(final_audio, threshold_dbfs=-2.0, release_ms=80, sr=sr)
+
         duration = len(final_audio) / sr
         
         # 3. Encoding to MP3
